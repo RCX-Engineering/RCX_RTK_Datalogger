@@ -397,24 +397,23 @@ static void configureLG290P(HardwareSerial& gpsSerial) {
     Serial.println("⚙️  Configuring LG290P...");
 
     // ── ORDER-CRITICAL: restart-triggering commands go FIRST ──────────────────
-    // PQTMCFGRCVRMODE and PQTMCFGSYS each trigger an internal nav-engine restart
-    // (see the fix-rate note further down — that restart is why fix rate STILL
-    // needs a full PQTMSRR on top of it). sendPQTM() is fire-and-forget: it
-    // writes, waits a flat 150 ms, and checks neither an ack nor whether a
-    // restart has settled. So any command issued BEFORE a restart-triggering one
-    // can be reverted by that restart before PQTMSAVEPAR captures the intended
-    // state, and the revert is silent — the command was accepted, it just isn't
-    // what ends up saved.
-    //   Measured, 2026-07-22 commute: with CFGSYS sent after the message-rate
-    //   commands, GSA was requested at 20 Hz (rate 1) yet held one value for
-    //   15-20 consecutive rows — ~1 Hz on the wire. CFGPROT (RTCM+NMEA accept)
-    //   is the same class of setting, and a silent revert there would stop the
-    //   module accepting RTCM even on a session where NTRIP forwards it
-    //   perfectly, which is far harder to notice than a wrong message rate.
-    // Therefore: restart-triggering commands go first and are allowed to settle,
-    // and everything else is configured after, so it is the last word before
-    // PQTMSAVEPAR. Read-back verification of the GSA rate and the constellation
-    // set follows below so this class of silent revert cannot hide again.
+    // BUG FOUND 2026-07-22: PQTMCFGRCVRMODE and PQTMCFGSYS each trigger an
+    // internal nav-engine restart (see the fix-rate note further down — that
+    // restart is why fix rate STILL needs a full PQTMSRR on top of it). CFGSYS
+    // used to be sent LAST, after every message-rate/protocol command below.
+    // sendPQTM() is fire-and-forget (writes + a flat 150 ms delay, no ack, no
+    // "restart settled" check) — so every command sent before a restart-
+    // triggering one is at risk of being reverted by it before PQTMSAVEPAR ever
+    // captures the intended state.
+    //   PROOF: real flown data (2026-07-22 commute) shows GSA — requested at
+    //   20 Hz (rate 1) — actually holding one value for 15-20 consecutive rows
+    //   before changing: ~1 Hz, not 20 Hz. The command was sent; it did not
+    //   survive to be what got saved. CFGPROT (RTCM+NMEA accept) is sent even
+    //   earlier in the OLD order and is exactly this kind of setting — if it
+    //   reverted the same way, the module could silently stop accepting RTCM
+    //   even on a session where NTRIP successfully forwards it.
+    // FIX: do the restart-triggering commands FIRST, let them settle, THEN
+    // configure everything else so it is the last word before PQTMSAVEPAR.
     sendPQTM(gpsSerial, "$PQTMCFGRCVRMODE,W,1");           // rover mode
     // All six constellations the LG290P supports. QZSS (field 5) and NavIC
     // (field 6) are regional — QZSS over ~135°E, NavIC over ~55-110°E — so from
@@ -726,13 +725,13 @@ static void handleRawNmeaLine(const char* line) {
         //   nothing tracked          → antenna/LNA/cable fault (or no power to an active antenna)
         //   a few sats at 20-30 dB-Hz → real signal, indoor attenuation
         //   many at 40+              → open sky; a no-fix is then a config problem
-        // Also prints the live masks, because a high C/N0 gate rejects most indoor
-        // signal by design — a bench "failure" that is correct behaviour.
+        // Also prints the live masks, because a 32 dB-Hz C/N0 gate rejects most
+        // indoor signal by design — a bench "failure" that is correct behaviour.
         static uint8_t  maxCno=0, nCnoUse=0, nCnoAny=0, lastQual=0, lastSats=0;
         static uint8_t  gsvMaxCno=0, gsvUse=0, gsvAny=0;
         const bool ckOk = nmeaChecksumValid(line);   // ckfail separates CORRUPTED
-        if (!ckOk) nCk++;                            // sentences from MISSING ones
-                                                     // (RMC count < GGA count)
+        if (!ckOk) nCk++;                            // (FIFO overrun mangling bytes)
+                                                     // from MISSING (RMC < GGA count)
         const char* typ = (line[1] && line[2]) ? line + 3 : "";
         if      (strncmp(typ, "GGA", 3) == 0) {
             nGGA++;
@@ -1007,6 +1006,15 @@ void gnss_init(HardwareSerial& serial) {
     if (!needFullConfig) {
         Serial.printf("🛰️  Masks (NVS): %.1f° / %.1f dB-Hz\n", s_eleMask, s_cnrMask);
         gnss_readAndLogPpp(serial);   // module truth — flags NVS/module divergence + old fw
+        // Nav dynamics model, asked of the module for the same reason as PPP above. This is
+        // the one setting configureLG290P() writes without ever reading back, and it lives in
+        // module NVM, so a write that failed to persist would never be noticed from NVS alone.
+        // The raw reply is printed: 0 = Normal (what configureLG290P requests), 11 = the
+        // factory mower profile, whose low-dynamics velocity filter is wrong for autocross.
+        // An ERROR,3 reply means the module firmware lacks the command entirely and the write
+        // has always been a no-op; ERROR,1 means the read form differs from what was sent.
+        gnss_readAndLogCfg(serial, "$PQTMCFGNAVMODE,R", "$PQTMCFGNAVMODE,OK",
+                           "Nav dynamics model (0 = Normal, 11 = mower)");
     }
 
 #if defined(PPP_NAV_DEBUG) && PPP_NAV_DEBUG
