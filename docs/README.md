@@ -9,7 +9,7 @@ These files are not conventional static schematics. Each HTML file contains a se
 | File | Purpose |
 |---|---|
 | [`RCX_RTK_Datalogger-schematic_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/schematics/RCX_RTK_Datalogger-schematic_viewer.html) | Engineering model viewer for the hardware and wiring configuration. |
-| [`RCX_RTK_Datalogger-firmware-architecture-viewer.html`](RCX_RTK_Datalogger-firmware-architecture-viewer.html) | Engineering model viewer for the firmware / software architecture. |
+| [`RCX_RTK_Datalogger-firmware_architecture_viewer.html`](RCX_RTK_Datalogger-firmware_architecture_viewer.html) | Engineering model viewer for the firmware / software architecture. |
 
 ## Knowledge Graph Model
 
