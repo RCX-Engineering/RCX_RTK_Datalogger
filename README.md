@@ -233,9 +233,11 @@ Connecting experimental hardware to a vehicle CAN network requires care: incorre
 
 Porsche 987.2 and 718 were used for development and their CAN addresses are hardcoded and automatically recognized. Other vehicles are supported by uploading a .dbc file with vehicle specific CAN data.
 
+A CAN sniffer tool is integrated into the rover and may be used to capture and save the raw CAN data stream to the MicroSD card to aid users in identifying available data channels.
+
 ### Bluetooth / SoloStorm
 
-The rover implements the published **RaceCapture** communication format over Bluetooth so that supported telemetry can be consumed by SoloStorm while the full data set is also retained locally.
+The rover implements the published **RaceCapture** communication format over Bluetooth so that supported telemetry can be consumed by software like SoloStorm while the full data set is also retained locally.
 
 ### Local Logging
 
@@ -285,17 +287,13 @@ When modifying the system architecture, please treat the firmware, wiring defini
 
 ## Project History
 
-The RCX RTK Datalogger and RCX RTK Base grew from a DIY motorsports data-logging experiment into a combined rover/base RTK platform through iterative static testing, autocross competition use, CAN reverse engineering, GNSS/antenna testing, and firmware optimization.
-
-The development discussion, test results, and design evolution are documented in the RoadRaceAutoX thread:
-
-**[DIY RTK GPS Datalogger: “Holy crap how is that possible??” level accuracy](https://www.roadraceautox.com/forum/general-discussion/fabrication-design/4178587-diy-rtk-gps-datalogger-holy-crap-how-is-that-possible-level-accuracy)**
+The RCX RTK Datalogger and RCX RTK Base grew from a DIY motorsports data-logging experiment in May 2026 into a combined rover/base RTK platform through iterative static testing, autocross competition use, CAN reverse engineering, GNSS/antenna testing, and firmware optimization.
 
 ## Acknowledgments
 
 The RCX RTK Datalogger and RCX RTK Base build on open protocols, open-source libraries, community reverse engineering, and the work of the developers who make the ESP32, GNSS, Bluetooth, web-server, and motorsports data ecosystems accessible to hobbyist engineering projects.
 
-In particular, the project uses the published **RaceCapture protocol from Autosport Labs** for motorsports telemetry interoperability.
+In particular, the project uses the published **RaceCapture protocol from Autosport Labs** for motorsports telemetry interoperability and referenced [**Racepi**](https://github.com/donour/racepi) code developed to implement RaceCapture protocol on an open source Raspberry Pi datalogger.
 
 ## License
 
