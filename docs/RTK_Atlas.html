@@ -1,0 +1,1298 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101f31">
+<title>RTK Caster Atlas — Autocross Site Analysis</title>
+<style>
+:root{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:#0d1724;color:#ecf3fa;color-scheme:dark}
+*{box-sizing:border-box}html,body{margin:0;min-width:300px}header{background:#102136;border-bottom:1px solid #314861;padding:11px 17px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}h1{font-size:18px;line-height:1.3;margin:0;font-weight:750}h1 b{color:#58c7de}header small{color:#9eb6c9}.app{display:grid;grid-template-columns:350px minmax(0,1fr);height:calc(100dvh - 51px);min-height:440px}aside{position:relative;z-index:2;min-height:0;overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y;background:#14263b;border-right:1px solid #36516b;padding:12px 16px 22px}#map{position:relative;z-index:0;isolation:isolate;overflow:hidden;background:#233b4b;min-width:0;min-height:0;touch-action:none;user-select:none;cursor:grab}#map.is-panning{cursor:grabbing}#map.is-marker{cursor:pointer}#tiles{position:absolute;inset:0;overflow:hidden;z-index:0;pointer-events:none}#tiles img{width:256px;height:256px;position:absolute;display:block;max-width:none;user-select:none;pointer-events:none}#overlay{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none}.map-ui{position:absolute;z-index:3;pointer-events:auto}.zoom{top:12px;right:12px;display:flex;flex-direction:column;gap:5px}.zoom button{width:39px;height:39px;padding:0;font-size:23px;border-radius:7px;touch-action:manipulation;background:#182d44eb}.map-hint{left:9px;top:9px;max-width:calc(100% - 66px);font-size:11px;background:#142536d9;padding:5px 8px;border-radius:5px;pointer-events:none}.attribution{right:0;bottom:0;max-width:95%;padding:3px 6px;font-size:10px;color:#eef1f5;background:#122435c9;pointer-events:auto}.attribution a{color:#b9dbff}.popup{position:absolute;z-index:4;left:10px;bottom:26px;max-width:min(340px,calc(100% - 20px));background:#eaf3fa;color:#152d42;padding:10px 30px 10px 12px;border-radius:8px;box-shadow:0 2px 15px #0008;font-size:12px}.popup{max-height:calc(100% - 62px);overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y}.popup .close{position:sticky;float:right;right:0;top:0;margin-right:-23px;margin-top:-5px;z-index:1;background:none;border:none;font-size:20px;color:#152d42;width:27px;padding:0}.popup[hidden]{display:none}.sectionhead{font-size:13px;margin:11px 0 6px;font-weight:750;color:#f5f9ff}label{display:block;font-size:12px;font-weight:650;color:#bacee1;margin:10px 0 5px}input,select,button{font:inherit;border-radius:7px;border:1px solid #48617b;padding:9px;color:#eff7ff;background:#1a314b;width:100%;min-width:0}input[type=range]{padding:0;accent-color:#44d5cb}button{background:#165e9e;cursor:pointer;font-weight:700;border-color:#3181c1}button:disabled{opacity:.55;cursor:default}button.secondary{background:#213c56}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #58cde6;outline-offset:2px}.row{display:flex;gap:7px}.row>*{flex:1;min-width:0}.card{margin:9px 0;padding:10px;border:1px solid #36516b;background:#192d43;border-radius:8px}.metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}.metric{background:#203950;padding:8px 5px;border-radius:7px;text-align:center}.metric strong{display:block;font-size:18px;color:#fff}.metric small,.muted{font-size:11px;color:#aec3d5}.check{display:flex;align-items:center;gap:9px;font-weight:450}.check input{width:17px;height:17px;flex:none}.status{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;max-height:140px;overflow:auto}.status.error{border-color:#d77474;color:#ffdfd7}.status.ok{border-color:#3b836b}.result{display:block;text-align:left;width:100%;margin:5px 0;padding:8px 10px;background:#223b54;border-color:#3b5571;font-weight:400}.result small{display:block;color:#bfd1df;margin-top:2px}.results{max-height:240px;overflow:auto}.badge{display:inline-block;background:#214460;color:#fff!important;border:1px solid #6c91af;padding:2px 6px;border-radius:4px;font-size:11px;line-height:1.4;vertical-align:baseline;font-weight:750}.popup .badge{background:#173953;color:#fff!important;border-color:#375f7b}select option,select optgroup{background:#192e45;color:#fff}.footer{font-size:11px;line-height:1.5;color:#acc0d1}.footer a{color:#9fcaff}.fileinput{display:none}
+@media(max-width:760px){header{padding:8px 11px;gap:3px}h1{font-size:16px}header small{font-size:10px}.app{display:flex;flex-direction:column;height:auto;min-height:0}#map{order:1;height:55dvh;min-height:350px;max-height:580px;flex:none;width:100%;z-index:0}aside{order:2;flex:none;overflow:visible;max-height:none;min-height:0;padding:11px 14px 40px;z-index:1;border-right:0;border-top:1px solid #3b536a}.sectionhead{margin-top:10px}.results{max-height:none}.status{max-height:none}header small{display:none}.map-hint{font-size:10px}.metrics{gap:8px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+
+.detail-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px}
+.detail-field{border-radius:6px;background:#223b52;padding:8px;min-width:0;overflow-wrap:anywhere}
+.detail-field small{display:block;color:#abc5d8;font-size:11px}
+.detail-field strong{display:block;font-size:12px;font-weight:600;margin-top:2px}
+.detail-title{font-weight:800;font-size:15px;margin-bottom:6px;overflow-wrap:anywhere}
+.detail-note{font-size:11px;color:#b9cede;margin:9px 0 0;line-height:1.45}
+#stationDetails[hidden]{display:none}
+#probeStatus{font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;padding:7px 0}
+.pill-unknown{color:#c4cfd9}.pill-free{color:#71e6be}.pill-fee{color:#ffa69a}.copy-row{display:flex;gap:7px;align-items:center;margin-top:8px}.copy-row select{flex:1;min-width:0}.copy-row button{flex:0 0 auto;width:auto;min-width:72px}.config-block{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;padding:9px;border:1px solid #446482;border-radius:6px;background:#101f30;color:#f0f8ff}.mobile-note{font-size:11px;color:#cbd9e8;margin-top:7px}#mobileCard[hidden]{display:none}
+@media(max-width:380px){.detail-grid{grid-template-columns:1fr}}
+
+.popup-distance{font-size:16px;font-weight:800;color:#0c364d;margin-bottom:4px}
+.popup-accuracy{font-size:12px;line-height:1.55;font-weight:600;margin-bottom:5px}
+.popup-station{border-top:1px solid #c5d6e4;padding-top:7px;margin-top:7px}
+.estimate-warning{color:#ffdb9d;font-weight:750;font-size:11px;line-height:1.4;margin-top:6px}
+.popup .estimate-warning{color:#8a3900;font-size:11px}
+/* Compact, expandable sidebar with high-priority site and station data first. */
+.intro{margin:0 0 12px;color:#e8f4fb;font-size:12px;line-height:1.42;max-width:55ch}
+.sidebar-section{border:1px solid #375371;border-radius:8px;background:#172c42;margin:9px 0;overflow:visible}
+.sidebar-section>summary{padding:10px 12px;font-weight:750;font-size:13px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:7px;color:#eef7ff;user-select:none}
+.sidebar-section>summary::before{content:'▸';display:inline-block;color:#67dbdf;font-size:13px;transition:transform .12s}
+.sidebar-section[open]>summary::before{transform:rotate(90deg)}
+.sidebar-section>summary::-webkit-details-marker{display:none}
+.sidebar-section[open]>summary{border-bottom:1px solid #38546e}
+.section-body{padding:9px 11px 13px;min-width:0}
+.section-body>label:first-child{margin-top:0}
+.subtle{color:#a9c3d4;font-size:11px;line-height:1.45;margin:9px 0 0}
+.radius-scale{display:flex;justify-content:space-between;color:#adc4d6;font-size:10px;margin-top:0}
+/* Radius is a screening cutoff, not a prediction of an individual caster baseline. */
+.radius-quality{margin:6px 0 8px;padding:7px 9px;border-left:3px solid #6ea5b7;border-radius:3px;background:#20384d;color:#d7e6f2;font-size:11px;line-height:1.4}
+.radius-quality.caution{border-left-color:#e7b366;background:#423529;color:#fff0d8}
+.action-row button{padding:5px 7px;min-height:32px;line-height:1.2;font-size:12px}
+@media(max-width:760px){.action-row button{min-height:36px}}
+.distance-hero{background:#233f57;border:1px solid #5c879e;padding:10px;border-radius:7px;margin:6px 0 10px}
+.distance-hero .range-head{font-size:17px;font-weight:800;color:#fff}
+.distance-hero .accuracy-main{font-size:12px;color:#e0f2ff;line-height:1.65}
+.distance-hero .estimate-note{font-size:10px;color:#b4d0dc;line-height:1.4;margin-top:3px}
+.result.active{outline:2px solid #72ecdf;background:#28516b}
+.project-footer{font-size:11px;color:#a9c4d5;padding:10px 2px 3px;text-align:center}
+.project-footer a{color:#a9e9fc}
+@media(max-width:760px){.intro{max-width:none}.sidebar-section>summary{padding:12px}.section-body{padding:10px 12px 14px}.popup{font-size:11px;padding:8px 32px 9px 10px}.popup-accuracy{font-size:11px;line-height:1.4}}
+.provider-selection{font-size:11px;line-height:1.5;margin:6px 0 8px;color:#c8deec}
+.provider-selection a,.provider-links a,.provider-directory a{color:#9fe3fc;text-decoration:underline;text-underline-offset:2px}
+.popup .provider-links a{color:#075c91}
+.provider-links{font-size:11px;line-height:1.5;margin:8px 0;overflow-wrap:anywhere}
+.directory-scroll{overflow-x:auto;margin-top:9px}
+.provider-directory{border-collapse:collapse;width:100%;font-size:11px;line-height:1.4}
+.provider-directory td,.provider-directory th{padding:6px 5px;vertical-align:top;border-bottom:1px solid #34526c;text-align:left}
+.provider-directory th{font-weight:750;color:#eaf5fd}
+.provider-directory td{color:#cfe0ec}
+.provider-directory td:first-child{font-weight:700;white-space:nowrap}
+.provider-directory td:last-child{min-width:70px}
+</style>
+</head>
+<body>
+<header><h1><b>◉</b> RTK Caster Atlas</h1><small>Public GNSS correction stations · Autocross site screening</small></header>
+<div class="app">
+<aside>
+<p class="intro">RTK (Real Time Kinematic) GNSS (Global Navigation Satellite System) datalogging can achieve cm-level precision with a base station within about 30 km.</p>
+<details class="sidebar-section" id="filtersSection">
+<summary>Map &amp; filters</summary>
+<div class="section-body">
+<label for="basemap">Basemap</label><select id="basemap"><option value="hybrid">Hybrid: USGS (US) / Esri (elsewhere)</option><option value="usgs">Aerial: USGS (US) / Esri (elsewhere)</option><option value="esri">Esri satellite imagery (worldwide)</option><option value="topo">Topographic: USGS (US) / Esri (elsewhere)</option></select>
+<label for="network">Network / caster</label><select id="network"><option value="all">All free &amp; free-tier networks</option></select>
+<div class="provider-selection" id="providerSelection">Select a network for operator details and registration links.</div>
+<div class="card" id="mobileCard" hidden><label for="mobileCaster">Autocross mobile mountpoint</label><select id="mobileCaster"></select><div id="mobileInfo" class="mobile-note"></div><div class="copy-row"><select id="mobileCopyField" aria-label="NTRIP setting to copy"><option value="all">Full rover configuration</option><option value="host">Host</option><option value="port">Port</option><option value="mountpoint">Mountpoint</option></select><button type="button" id="mobileCopy">Copy</button></div></div>
+<div class="row"><div><label for="access">Access / fee</label><select id="access"><option value="free">Free / free tier (default)</option><option value="all">All listings including paid</option><option value="fee">Paid / fee reported</option><option value="unknown">Terms unverified</option></select></div>
+<div><label for="frequency">Bands (reported)</label><select id="frequency"><option value="all">All</option><option value="triple">≥3 bands</option><option value="dual">≥2 bands</option><option value="unknown">Unknown</option></select></div></div>
+<label for="registration">Registration</label><select id="registration"><option value="all">All access methods</option><option value="required">Registration / email required</option><option value="none">No account required</option><option value="unknown">Unverified</option></select>
+<label for="constellation">Reported constellation</label><select id="constellation"><option value="all">All</option><option value="GPS">GPS</option><option value="GLO">GLONASS</option><option value="GAL">Galileo</option><option value="BDS">BeiDou</option><option value="QZS">QZSS</option><option value="IRS">NavIC</option></select>
+<label for="search">Search station or mountpoint</label><input id="search" type="search" placeholder="Station, caster, network…">
+</div></details>
+
+<details class="sidebar-section" id="venuesSection">
+<summary>Racetracks &amp; autocross venues</summary>
+<div class="section-body">
+<label for="venue">Select known autocross venue</label>
+<select id="venue"><option value="">Choose a venue…</option></select>
+<div id="venueStatus" class="mobile-note">Selecting a venue automatically sets the search origin.</div>
+<label class="check"><input type="checkbox" id="showVenues" checked> Show autocross venues</label>
+<label class="check"><input type="checkbox" id="showTracks" checked> Show motorsport racetracks</label>
+<label for="trackFilter">Racetrack type</label><select id="trackFilter"><option value="all">All motorsport tracks (default)</option><option value="verified">SCCA/NASA paved road courses (2026)</option><option value="road">All road courses / mixed</option><option value="oval">Ovals / speedways</option><option value="drag">Drag strips</option><option value="kart">Karting</option><option value="offroad">Off-road / motocross</option><option value="other">Unclassified</option></select>
+<label for="trackSelect">Select racetrack</label><select id="trackSelect"><option value="">Choose a track…</option></select>
+<label for="trackAction">Additional OpenStreetMap discovery</label><select id="trackAction"><option value="view">Find tracks in current map view</option><option value="nation">Survey U.S. in regions (slow; user-initiated)</option></select>
+<div class="row action-row" style="margin-top:7px"><button type="button" class="secondary" id="loadTracks">Find tracks</button><button type="button" class="secondary" id="stopTracks" disabled>Stop</button></div>
+<div class="muted" id="trackStatus">Loading road-course and supplemental tracks…</div>
+</div></details>
+
+<details class="sidebar-section" id="siteSection" open>
+<summary>Site coordinates &amp; search radius</summary>
+<div class="section-body">
+<label for="site">Site coordinates (latitude, longitude)</label><input id="site" inputmode="text" placeholder="e.g. 37.085, -76.385">
+<div class="row action-row" style="margin-top:7px"><button class="secondary" id="locate">Set site</button><button class="secondary" id="mypos">My location</button><button class="secondary" id="clear">Clear</button></div>
+<label for="radius">Search radius: <strong id="radiusDisplay">12 mi (19.3 km)</strong></label>
+<input type="range" id="radius" min="0" max="12" step="1" value="4" aria-label="Search radius">
+<div class="radius-scale"><span id="radiusMin">3 mi</span><span id="radiusMid">25 mi</span><span id="radiusMax">100 mi</span></div>
+<p class="radius-quality" id="radiusQuality" role="status" aria-live="polite"></p>
+<label class="check"><input type="checkbox" id="nearonly"> Only show stations within radius</label>
+<p class="subtle">Select a checkered flag or tap the map to set the search origin. Venue coordinates may represent a facility or entrance, not the course surface.</p>
+</div></details>
+
+<details class="sidebar-section" id="nearestSection" open>
+<summary>Nearest NTRIP stations <span class="muted" id="resultTitle"></span></summary>
+<div class="section-body"><div class="results" id="results">Select a venue flag or a site to find nearby NTRIP stations.</div></div>
+</details>
+
+<details class="sidebar-section" id="detailsSection" open>
+<summary>Selected NTRIP station</summary>
+<div class="section-body">
+<div id="stationDetails" class="card" hidden></div>
+<div class="muted" id="stationPlaceholder">Select a colored NTRIP station on the map or in the nearest-station list.</div>
+</div></details>
+
+<details class="sidebar-section" id="providersSection">
+<summary>U.S. NTRIP provider access &amp; registration</summary>
+<div class="section-body"><p class="subtle">Provider access terms; not proof of an active stream. Unverified terms are labeled explicitly.</p>
+<div class="directory-scroll"><table class="provider-directory"><thead><tr><th>Provider</th><th>Access</th><th>Account</th><th>Links</th></tr></thead><tbody id="providerDirectory"></tbody></table></div></div>
+</details>
+<details class="sidebar-section" id="dataSection">
+<summary>Catalog information &amp; data</summary>
+<div class="section-body">
+<div class="card metrics"><div class="metric"><strong id="count">—</strong><small>Stations</small></div><div class="metric"><strong id="netcount">—</strong><small>Networks</small></div><div class="metric"><strong id="shown">—</strong><small>On map</small></div></div>
+<div id="status" class="card status" role="status" aria-live="polite">Loading station data…</div>
+<button class="secondary" id="export">Export filtered stations CSV</button>
+<p class="footer">Station listings are catalog entries, not proof of an active correction stream. Source capabilities and fee terms may be incomplete. Venue and racetrack positions may be approximate.</p>
+<p class="footer">Station catalog: <a href="https://github.com/sacrusha/ntrip-mountpoint-map" target="_blank" rel="noopener noreferrer">NTRIP Mountpoint Map</a>. Track records: event calendars, RaceCapture, RaceTracksAPI and © OpenStreetMap contributors (ODbL). Imagery: USGS and Esri.</p>
+</div></details>
+<footer class="project-footer"><a href="https://github.com/RCX-Engineering/RCX_RTK_Datalogger" target="_blank" rel="noopener noreferrer">RCX RTK Datalogger on GitHub</a> · <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">Atlas: Apache 2.0</a></footer>
+</aside>
+<div id="map" role="application" aria-label="Map of NTRIP station locations. Tap the map to select an autocross site.">
+<div id="tiles"></div><canvas id="overlay" aria-hidden="true"></canvas>
+<div class="map-ui zoom"><button type="button" id="zoomIn" aria-label="Zoom in">+</button><button type="button" id="zoomOut" aria-label="Zoom out">−</button></div>
+<div class="map-ui map-hint" id="mapHint">Tap colored dots for NTRIP details · flags search nearby casters · drag to pan</div>
+<div class="map-ui attribution" id="attribution">US imagery © USGS / USDA · Worldwide imagery © Esri</div>
+<div class="popup" id="popup" hidden><button class="close" id="closePopup" aria-label="Close popup">×</button><div id="popupContent"></div></div>
+</div>
+</div>
+<script>
+'use strict';
+/* Dependency-free slippy-map viewer. Map tiles are the only resources required for map imagery. */
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const CATALOG_URLS=[
+ 'https://raw.githubusercontent.com/sacrusha/ntrip-mountpoint-map/main/data/stations.json',
+ 'https://ntrip-mountpoint-map.pages.dev/data/stations.json',
+ 'https://sacrusha.github.io/ntrip-mountpoint-map/data/stations.json'
+];
+/* =======================================================================
+   AUTOCROSS MOBILE CASTERS — ADD YOUR EVENT CASTERS HERE
+   One entry per mountpoint. `lat`/`lon` are OPTIONAL temporary coordinates.
+   Leave them null when the station position is unknown. A map marker is then
+   shown ONLY if a geolocated station appears in the downloaded catalog.
+   The public caster/source-table registry may omit temporary stations.
+   This is informational: opening this page does not connect to NTRIP TCP.
+   ======================================================================= */
+const MOBILE_NETWORK='Autocross Mobile Casters';
+const MOBILE_CASTERS=[
+ {name:'RCX0',host:'crtk.net',port:2101,sourceNetwork:'centipede',lat:null,lon:null},
+ {name:'RCX1',host:'crtk.net',port:2101,sourceNetwork:'centipede',lat:null,lon:null}
+];
+/* Provider access directory: status refers to the operator's advertised
+   correction service, not a guarantee that an individual mountpoint is online.
+   Sources and registration URLs are maintained separately from station data.
+   Add new US networks here; use a catalog network key as the object key.
+   Keep any unconfirmed fees/registration set to 'unverified'/'unknown'. */
+const NETWORK_POLICIES={
+ rtk2go:{name:'RTK2go',tier:'free',registration:'none',website:'https://rtk2go.com/',note:'No rover account registration. Supply a valid email address as the NTRIP username; password can be arbitrary.'},
+ centipede:{name:'Centipede-RTK',tier:'free',registration:'none',website:'https://docs.centipede-rtk.org/access.html',note:'No registration or credentials required; optional username/password centipede/centipede. NEAR and NEAR4 require GGA.'},
+ kycors:{name:'Kentucky KYCORS',tier:'free',feeBasis:'user',registration:'required',website:'https://kycors.ky.gov/',register:'https://kycors.ky.gov/',note:'Free access reported by users; published fee terms not independently confirmed. Register for a KYCORS rover login.'},
+ earthscope:{name:'EarthScope / NOTA',tier:'free-tier',registration:'required',website:'https://www.earthscope.org/data/gnss-realtime/',register:'https://www.earthscope.org/user/licenses/',note:'Noncommercial scientific, educational and humanitarian use is free with annual license; commercial RTCM streams may require a paid license. Registration required.'},
+ nps_cors:{name:'NPS Real-Time GNSS',tier:'free',feeBasis:'user',registration:'required',website:'https://ntrip.nps.gov/',register:'mailto:neil_winn@ios.doi.gov?subject=NPS%20GNSS%20NTRIP%20Access',note:'NPS account required; free access reported by users, but no public fee schedule verified. General users: rtk.nps.gov port 2102 (2101 is for DOI/partners).'},
+ iartn:{name:'Iowa IaRTN',tier:'free',registration:'required',website:'https://iartnsbc.iowadot.gov/',register:'https://iartnsbc.iowadot.gov/sbc/Account/Register',note:'No-cost two-year RTK subscription; NTRIP user account required.'},
+ nysnet:{name:'New York NYSNet',tier:'free',registration:'required',website:'https://cors.dot.ny.gov/NYSNet%20welcome_0.htm',register:'https://cors.dot.ny.gov/SBC/Account/Register',note:'No-charge NYSDOT real-time network. Register for username and password; some single-base streams require approval.'},
+ orgn:{name:'Oregon ORGN',tier:'free',registration:'required',website:'https://www.oregon.gov/odot/orgn/pages/index.aspx',register:'https://www.oregon.gov/odot/orgn/pages/account-requests.aspx',note:'Rover accounts currently issued at no direct charge; ODOT reserves the right to charge in the future.'},
+ vector:{name:'Vermont VECTOR',tier:'free',registration:'required',website:'https://vtrans.vermont.gov/highway/geodetic/cors/real-time',register:'https://vtrans.vermont.gov/highway/geodetic/cors',note:'VTrans public-service network; user registration and secure NTRIP login required.'},
+ modot_rtn:{name:'Missouri MoDOT RTN',tier:'free',registration:'required',website:'https://www.modot.org/cadd-services',register:'https://www.modot.org/cadd-services',note:'MoDOT advertises free signup for its real-time network.'},
+ fprn:{name:'Florida FPRN',tier:'free',registration:'required',website:'https://www.fdot.gov/Geospatial/fprn.shtm',register:'https://www.fdot.gov/Geospatial/fprnfaq.shtm',note:'Free; separate rover account required for each device. Account activation generally takes 24–48 hours.'},
+ mncors:{name:'Minnesota MnCORS',tier:'free',registration:'required',website:'https://www.dot.state.mn.us/surveying/cors/',register:'https://www.dot.state.mn.us/surveying/cors/mncors_faq.html',note:'No subscription fee. Register for network login; unused accounts may be deactivated.'},
+ odot_rtn:{name:'Ohio ORTN',tier:'unverified',registration:'required',website:'https://ortn.dot.state.oh.us/TrimblePivotWeb/',register:'mailto:cors@dot.state.oh.us?subject=Ohio%20RTN%20Account',note:'Contact Ohio RTN administrator to obtain login. Public fee terms not confirmed.'},
+ wiscors:{name:'Wisconsin WISCORS',tier:'unverified',registration:'required',website:'https://wisconsindot.gov/Pages/doing-bus/eng-consultants/cnslt-rsrces/tools/wiscors/default.aspx',note:'New users request access through WISCORS Web Application. Published fee terms not confirmed.'},
+ wvrtn:{name:'West Virginia WVRTN',tier:'unverified',registration:'unknown',website:'https://www.transportation.wv.gov/',note:'Caster listed in public source catalog. Current access requirements and fees unverified.'},
+ ardot_rtn:{name:'Arkansas ARDOT RTN',tier:'unverified',registration:'unknown',website:'https://ardot.gov/',note:'Caster listed in public source catalog. Rover access and fees not independently confirmed.'},
+ alcors:{name:'Alabama ALCORS',tier:'unverified',registration:'unknown',website:'https://www.dot.state.al.us/',note:'ALDOT public GNSS network listed by NOAA; current login/fees unverified.'},
+ macors:{name:'Massachusetts MaCORS',tier:'unverified',registration:'unknown',website:'https://www.mass.gov/orgs/massachusetts-department-of-transportation',note:'MassDOT RTN listed by NOAA; current login/fees unverified.'}
+};
+const COMMON_US_NETWORKS=[
+ ['rtk2go','RTK2go'],['centipede','Centipede-RTK'],['kycors','Kentucky KYCORS'],
+ ['earthscope','EarthScope / NOTA'],['nps_cors','NPS CORS'],['iartn','Iowa RTN'],
+ ['nysnet','New York NYSNet'],['orgn','Oregon ORGN'],['vector','Vermont VECTOR'],
+ ['modot_rtn','Missouri DOT RTN'],['fprn','Florida FPRN'],['mncors','Minnesota MnCORS'],
+ ['wiscors','Wisconsin WISCORS'],['odot_rtn','Ohio ORTN'],['wvrtn','West Virginia RTN'],
+ ['ardot_rtn','Arkansas DOT RTN'],['alcors','Alabama CORS'],['macors','Massachusetts MaCORS']
+];
+const MAPS={
+ hybrid:{url:'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}',credit:'USGS imagery + roads and labels © USGS / USDA, The National Map'},
+ esri:{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',credit:'Imagery © Esri, Maxar, Earthstar Geographics, and others'},
+ usgs:{url:'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}',credit:'Imagery © USGS / USDA, The National Map'},
+ topo:{url:'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',credit:'Map © USGS, The National Map'}
+};
+const COLORS={rtk2go:'#ffb24e',centipede:'#23dfaf',earthscope:'#c7a5ff',mobile:'#ff6dcb',other:'#68bff7'};
+const MAX_LAT=85.05112878;
+const MAX_USGS_ZOOM=16; // Published 1:9,028 maximum scale for USGS cached imagery.
+// The 1 cm + 1 ppm assumption matches u-blox F9P up to 20 km of baseline;
+// some professional receivers rate similar models up to 30 km.
+const NOMINAL_BASELINE_KM=20;
+const LONG_BASELINE_KM=30;
+const MIXED_IMAGERY_CREDIT='US imagery © USGS / USDA, The National Map · Worldwide imagery © Esri and contributors';
+// Conservative geographic masks determine imagery only, not political borders.
+// Ambiguous border tiles intentionally use Esri; USGS tiles remain on U.S. interiors.
+// Longitude/latitude pairs follow a simplified interior footprint; this avoids
+// hard-switching the entire map when panning across an international boundary.
+const US_INTERIOR_POLYGONS=[
+ // Contiguous USA: simplified footprint, deliberately inset at borders.
+ [[-123.5,48.0],[-123.5,43.0],[-122.6,40.0],[-119.3,36.0],[-117.0,33.1],
+ [-112.8,32.4],[-110.2,31.7],[-108.3,31.7],[-106.6,31.9],[-104.6,29.7],
+ [-103.1,29.2],[-100.0,29.2],[-98.0,26.9],[-97.1,26.3],[-96.1,28.5],
+ [-94.0,29.5],[-91.0,29.6],[-88.0,30.5],[-85.0,29.9],[-82.1,25.0],
+ [-80.5,25.3],[-80.2,31.0],[-78.4,34.0],[-75.5,36.0],[-74.0,39.8],
+ [-70.4,41.9],[-67.3,44.8],[-69.0,47.0],[-71.9,45.1],[-73.2,45.0],
+ [-74.8,44.5],[-76.6,43.5],[-78.9,43.4],[-79.2,42.0],[-82.4,41.8],
+ [-83.0,42.0],[-84.9,41.7],[-86.4,41.7],[-88.6,42.1],[-90.6,46.0],
+ [-92.0,46.6],[-94.9,49.0],[-99.0,48.7],[-110.0,48.6],[-117.0,48.7],[-123.5,48.0]],
+ // Main islands of Hawaii, approximate bounds for aerial-tile selection.
+ [[-160.5,21.4],[-159.1,22.3],[-157.4,21.8],[-154.7,19.8],[-154.9,18.8],[-156.5,20.0],[-158.2,21.0],[-160.5,21.4]],
+ // Alaska: mainland interior; coastal/island tiles use Esri if ambiguous.
+ [[-165.0,66.0],[-162.0,68.5],[-156.0,70.5],[-146.0,70.5],[-141.2,68.9],[-141.2,60.5],[-138.5,59.0],[-135.0,58.6],[-140.0,59.8],[-147.0,60.4],[-154.0,57.8],[-160.0,59.0],[-163.0,62.5],[-165.0,66.0]],
+ // Puerto Rico (coastal boundaries approximate).
+ [[-67.2,18.6],[-65.5,18.6],[-65.5,17.9],[-67.2,17.9],[-67.2,18.6]]
+];
+function pointInPolygon(lon,lat,polygon){
+ let inside=false;
+ for(let i=0,j=polygon.length-1;i<polygon.length;j=i++){
+  const [xi,yi]=polygon[i],[xj,yj]=polygon[j];
+  if((yi>lat)!==(yj>lat)&&lon<(xj-xi)*(lat-yi)/(yj-yi)+xi)inside=!inside;
+ }
+ return inside;
+}
+function withinUSImagery(lon,lat){
+ return US_INTERIOR_POLYGONS.some(p=>pointInPolygon(lon,lat,p));
+}
+function tileMapProvider(z,x,y){
+ if(state.basemap==='esri'||z>MAX_USGS_ZOOM)return 'esri';
+ // Georeference the tile center and four corners. Switch to Esri on tiles
+ // straddling a border, preventing spurious USGS requests for other countries.
+ const xs=[x+0.02,x+0.98,x+0.5],ys=[y+0.02,y+0.98,y+0.5];
+ const samples=[[xs[0],ys[0]],[xs[1],ys[0]],[xs[0],ys[1]],[xs[1],ys[1]],[xs[2],ys[2]]];
+ const world=256*2**z;
+ return samples.every(([tx,ty])=>{
+  const lon=((tx*256)/world)*360-180;
+  const lat=Math.atan(Math.sinh(Math.PI*(1-2*(ty*256)/world)))*180/Math.PI;
+  return withinUSImagery(lon,lat);
+ })?state.basemap:'esri';
+}
+const state={lat:39,lon:-96,zoom:3,basemap:'hybrid',stations:[],filtered:[],site:null,mode:'catalog',sourceTime:'',sourceMeta:{},selected:null,probes:new Map(),venues:[],tracks:[],trackFiltered:[]};
+const mapEl=$('map'),tileEl=$('tiles'),canvas=$('overlay'),ctx=canvas.getContext('2d',{alpha:true});
+let width=0,height=0,dpr=1,tiles=new Map(),drawPending=false,siteUI=null,dataSerial=0,tileLoaded=0,tileFailures=0;
+const pointerMap=new Map();
+let gestureCancelled=false;
+const HIT_CELL=32;
+let stationHitGrid=new Map(),locationHitGrid=new Map();
+function registerHit(grid,x,y,item){
+ const key=`${Math.floor(x/HIT_CELL)},${Math.floor(y/HIT_CELL)}`;
+ if(!grid.has(key))grid.set(key,[]);
+ grid.get(key).push({x,y,item});
+}
+function nearestHit(grid,x,y,radius){
+ let closest=null,bestSq=radius*radius;
+ const cx=Math.floor(x/HIT_CELL),cy=Math.floor(y/HIT_CELL);
+ for(let i=-1;i<=1;i++)for(let j=-1;j<=1;j++){
+  const cell=grid.get(`${cx+i},${cy+j}`);
+  if(!cell)continue;
+  // Equal-distance markers prefer the last rendered item (visually on top).
+  for(const point of cell){const d=(point.x-x)**2+(point.y-y)**2;
+   if(d<=bestSq){closest=point.item;bestSq=d}}
+ }
+ return closest;
+}
+function pointerLocation(e){const r=mapEl.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top}}
+function mapHit(x,y,touch=false){
+ // Stations take precedence over venues and tracks, matching visual stacking.
+ const station=nearestHit(stationHitGrid,x,y,touch?18:13);
+ if(station)return {kind:'station',value:station};
+ const location=nearestHit(locationHitGrid,x,y,touch?20:16);
+ return location?{kind:'location',value:location}:null;
+}
+function updateMapCursor(e){
+ if(e.pointerType==='touch'||pointerMap.size)return;
+ const {x,y}=pointerLocation(e);
+ mapEl.classList.toggle('is-marker',Boolean(mapHit(x,y)));
+}
+function clamp(v,min,max){return Math.min(max,Math.max(min,v))}
+function normLon(v){return ((v+180)%360+360)%360-180}
+function wSize(){return 256*Math.pow(2,state.zoom)}
+function project(lat,lon){const s=wSize(),phi=clamp(lat,-MAX_LAT,MAX_LAT)*Math.PI/180;return {x:(lon+180)/360*s,y:(1-Math.asinh(Math.tan(phi))/Math.PI)/2*s}}
+function unproject(x,y){const s=wSize();return {lat:(180/Math.PI)*Math.atan(Math.sinh(Math.PI*(1-2*y/s))),lon:normLon(x/s*360-180)}}
+function center(){return project(state.lat,state.lon)}
+function screen(lat,lon){const p=project(lat,lon),o=center(),s=wSize();let dx=p.x-o.x;if(dx>s/2)dx-=s;if(dx< -s/2)dx+=s;return {x:width/2+dx,y:height/2+p.y-o.y}}
+function screenToGeo(x,y){const c=center();return unproject(c.x+x-width/2,c.y+y-height/2)}
+let viewAnimation=0;
+function cancelViewAnimation(){if(viewAnimation){cancelAnimationFrame(viewAnimation);viewAnimation=0}}
+function setCenter(lat,lon){cancelViewAnimation();state.lat=clamp(lat,-MAX_LAT,MAX_LAT);state.lon=normLon(lon);syncDistanceUnits();scheduleDraw()}
+function offsetCenter(dx,dy){const c=center(),p=unproject(c.x-dx,c.y-dy);setCenter(p.lat,p.lon)}
+function zoom(delta,anchorX=width/2,anchorY=height/2){
+ cancelViewAnimation();const newZoom=clamp(Math.round(state.zoom)+delta,2,19);if(newZoom===state.zoom)return;
+ const before=screenToGeo(anchorX,anchorY);state.zoom=newZoom;
+ const p=project(before.lat,before.lon),target=unproject(p.x-(anchorX-width/2),p.y-(anchorY-height/2));
+ state.lat=target.lat;state.lon=target.lon;syncDistanceUnits();clearTiles();scheduleDraw();
+}
+function animateToLocation(lat,lon,zoomTarget){
+ cancelViewAnimation();
+ const endLat=clamp(lat,-MAX_LAT,MAX_LAT),endLon=normLon(lon),endZoom=clamp(zoomTarget,2,19);
+ const startScale=wSize(),startPt=project(state.lat,state.lon),endPt=project(endLat,endLon);
+ const startX=startPt.x/startScale,startY=startPt.y/startScale,startZoom=state.zoom;
+ let endX=endPt.x/startScale,endY=endPt.y/startScale;
+ // Cross the international date line in the shorter direction.
+ if(endX-startX>.5)endX-=1;
+ else if(endX-startX<-.5)endX+=1;
+ const mercatorToLat=y=>Math.atan(Math.sinh(Math.PI*(1-2*y)))*180/Math.PI;
+ const duration=matchMedia('(prefers-reduced-motion: reduce)').matches?0:
+  clamp(1050+Math.abs(endZoom-startZoom)*70,1050,1700);
+ if(!duration){state.lat=endLat;state.lon=endLon;state.zoom=endZoom;syncDistanceUnits();scheduleDraw();return}
+ const start=performance.now();
+ function frame(now){
+  const t=clamp((now-start)/duration,0,1),ease=t*t*(3-2*t);
+  state.lat=mercatorToLat(startY+(endY-startY)*ease);
+  state.lon=normLon((startX+(endX-startX)*ease)*360-180);
+  state.zoom=startZoom+(endZoom-startZoom)*ease;
+  scheduleDraw();
+  if(t<1)viewAnimation=requestAnimationFrame(frame);
+  else{viewAnimation=0;state.lat=endLat;state.lon=endLon;state.zoom=endZoom;syncDistanceUnits();scheduleDraw()}
+ }
+ viewAnimation=requestAnimationFrame(frame);
+}
+function clearTiles(){for(const t of tiles.values())t.remove();tiles.clear();tileLoaded=0;tileFailures=0}
+function switchBasemap(id,message=''){state.basemap=id;$('basemap').value=id;$('attribution').textContent=id==='esri'?MAPS.esri.credit:MIXED_IMAGERY_CREDIT;if(message)$('mapHint').textContent=message}
+function resize(){const rect=mapEl.getBoundingClientRect();width=Math.max(1,Math.round(rect.width));height=Math.max(1,Math.round(rect.height));dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);canvas.style.width=width+'px';canvas.style.height=height+'px';ctx.setTransform(dpr,0,0,dpr,0,0);scheduleDraw()}
+function scheduleDraw(){if(drawPending)return;drawPending=true;requestAnimationFrame(()=>{drawPending=false;if(width&&height){drawTiles();drawMarkers()}})}
+function drawTiles(){
+ // Fractional display zoom allows smooth programmatic fly-to animations while
+ // tile servers receive only valid integer XYZ indices and zoom levels.
+ const level=Math.floor(state.zoom),scale=2**(state.zoom-level),n=2**level;
+ const c=center(),left=(c.x-width/2)/scale,top=(c.y-height/2)/scale;
+ const x0=Math.floor(left/256)-1,x1=Math.floor((left+width/scale)/256)+1;
+ const y0=Math.max(0,Math.floor(top/256)-1),y1=Math.min(n-1,Math.floor((top+height/scale)/256)+1);
+ const needed=new Set();
+ for(let tx=x0;tx<=x1;tx++)for(let ty=y0;ty<=y1;ty++){
+  const xt=((tx%n)+n)%n;
+  const provider=tileMapProvider(level,xt,ty);
+  const key=`${state.basemap}/${provider}/${level}/${xt}/${ty}`;
+  needed.add(key);
+  let img=tiles.get(key);
+  if(!img){
+   img=document.createElement('img');img.alt='';img.decoding='async';img.draggable=false;
+   img.onload=()=>{if(tiles.get(key)===img)tileLoaded++};
+   img.onerror=()=>{
+    if(tiles.get(key)!==img)return;
+    tileFailures++;
+    if(provider!=='esri'&&!img.dataset.fallback){
+     // Only the affected tile falls back; the selected basemap does not change.
+     img.dataset.fallback='esri';
+     img.src=MAPS.esri.url.replace('{z}',level).replace('{x}',xt).replace('{y}',ty);
+    }else{
+     img.style.visibility='hidden';
+     if(tileFailures>5&&!tileLoaded)$('mapHint').textContent='Imagery unavailable. Check connectivity.';
+    }
+   };
+   img.src=MAPS[provider].url.replace('{z}',level).replace('{x}',xt).replace('{y}',ty);
+   tiles.set(key,img);tileEl.append(img);
+  }
+  img.style.left=((tx*256-left)*scale)+'px';img.style.top=((ty*256-top)*scale)+'px';
+  img.style.width=(256*scale)+'px';img.style.height=(256*scale)+'px';
+ }
+ for(const [key,img] of tiles)if(!needed.has(key)){img.remove();tiles.delete(key)}
+}
+
+function netClass(v){v=String(v).toLowerCase();return v.includes('autocross mobile')?'mobile':v.includes('rtk2go')?'rtk2go':v.includes('centipede')||v.includes('crtk')?'centipede':v.includes('earthscope')||v.includes('nota')?'earthscope':'other'}
+// Canvas rendering order: approximate venues at the bottom, then racetracks,
+// the optional analysis radius/site, and finally NTRIP station markers on top.
+function drawMarkers(){
+ ctx.clearRect(0,0,width,height);
+ stationHitGrid=new Map();locationHitGrid=new Map();
+ drawVenuesAndTracks();
+ if(state.site){
+  const a=state.site,r=radiusKm();
+  ctx.beginPath();
+  for(let k=0;k<=72;k++){
+   const bearing=k*2*Math.PI/72,rad=r/6371.0088,lat0=a.lat*Math.PI/180,lon0=a.lon*Math.PI/180;
+   const lat=Math.asin(Math.sin(lat0)*Math.cos(rad)+Math.cos(lat0)*Math.sin(rad)*Math.cos(bearing));
+   const lon=lon0+Math.atan2(Math.sin(bearing)*Math.sin(rad)*Math.cos(lat0),Math.cos(rad)-Math.sin(lat0)*Math.sin(lat));
+   const p=screen(lat*180/Math.PI,lon*180/Math.PI);
+   k===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y);
+  }
+  ctx.closePath();ctx.fillStyle='rgba(27,243,219,.055)';ctx.fill();ctx.strokeStyle='#13ebd4';ctx.lineWidth=1.6;ctx.stroke();
+  const p=screen(a.lat,a.lon);
+  if(a.kind==='venue'||a.kind==='track'){
+   // This is a facility/entrance reference, NOT a surveyed course location.
+   // Highlight the general area without drawing a misleading target crosshair.
+   drawSelectedVenueGlow(p.x,p.y);
+  }else{
+   // A crosshair is appropriate only where the user explicitly picked a point.
+   ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(p.x-11,p.y);ctx.lineTo(p.x+11,p.y);ctx.moveTo(p.x,p.y-11);ctx.lineTo(p.x,p.y+11);ctx.stroke();
+   ctx.strokeStyle='#ef5656';ctx.lineWidth=2;ctx.strokeRect(p.x-6,p.y-6,12,12);
+  }
+ }
+ let drawn=0;
+ // Draw unselected casters first, then the selected station on top of any overlap.
+ const ordered=state.selected&&state.filtered.includes(state.selected)?
+  [...state.filtered.filter(s=>s!==state.selected),state.selected]:state.filtered;
+ for(const s of ordered){
+  const p=screen(s.lat,s.lon);if(p.x< -24||p.x>width+24||p.y< -24||p.y>height+24)continue;
+  if(s===state.selected){
+   ctx.save();const glow=ctx.createRadialGradient(p.x,p.y,3,p.x,p.y,21);
+   glow.addColorStop(0,'rgba(105,255,231,.55)');glow.addColorStop(.5,'rgba(105,255,231,.25)');glow.addColorStop(1,'rgba(105,255,231,0)');
+   ctx.beginPath();ctx.arc(p.x,p.y,21,0,Math.PI*2);ctx.fillStyle=glow;ctx.fill();
+   ctx.beginPath();ctx.arc(p.x,p.y,9.5,0,Math.PI*2);ctx.lineWidth=2.3;ctx.strokeStyle='#d7fff6';ctx.stroke();ctx.restore();
+  }
+  ctx.beginPath();ctx.arc(p.x,p.y,state.zoom>=10?4.8:state.zoom>=6?3.9:2.9,0,Math.PI*2);
+  ctx.fillStyle=COLORS[netClass(s.network)];ctx.fill();ctx.lineWidth=.8;ctx.strokeStyle='#0d1e2a';ctx.stroke();
+  registerHit(stationHitGrid,p.x,p.y,s);drawn++;
+ }
+ $('shown').textContent=drawn.toLocaleString();
+}
+const KM_PER_MILE=1.609344;
+const US_RADII_MILES=[3,5,8,10,12,15,20,25,30,40,50,75,100];
+const INTL_RADII_KM=[5,8,10,15,20,25,30,40,50,60,80,100,150];
+let useUSUnits=true;
+function isUSPoint(lat,lon){
+ return (lat>=24&&lat<=50.5&&lon>=-125.5&&lon<=-66)||(lat>=51&&lat<=72&&lon>=-180&&lon<=-129)||(lat>=18&&lat<=23&&lon>=-161.5&&lon<=-154)||(lat>=17.5&&lat<=18.7&&lon>=-67.5&&lon<=-65);
+}
+function radiusSteps(){return useUSUnits?US_RADII_MILES:INTL_RADII_KM}
+function radiusKm(){const values=radiusSteps();return values[Number($('radius').value)]*(useUSUnits?KM_PER_MILE:1)}
+function lengthLabel(km){return useUSUnits?`${(km/KM_PER_MILE).toFixed(1)} mi (${km.toFixed(1)} km)`:`${km.toFixed(1)} km (${(km/KM_PER_MILE).toFixed(1)} mi)`}
+function refreshRadiusLabel(){
+ const values=radiusSteps(),v=values[Number($('radius').value)],km=radiusKm();
+ $('radiusDisplay').textContent=useUSUnits?`${v} mi (${km.toFixed(1)} km)`:`${v} km (${(km/KM_PER_MILE).toFixed(1)} mi)`;
+ $('radiusMin').textContent=`${values[0]} ${useUSUnits?'mi':'km'}`;
+ $('radiusMid').textContent=`${values[Math.floor(values.length/2)]} ${useUSUnits?'mi':'km'}`;
+ $('radiusMax').textContent=`${values.at(-1)} ${useUSUnits?'mi':'km'}`;
+ $('radius').setAttribute('aria-valuetext',$('radiusDisplay').textContent);
+ // The selected radius bounds the search. Individual station estimates use their actual distances.
+ const note=$('radiusQuality');
+ let message;
+ if(km<=10){
+  message='Short-range search: nearby bases generally favor reliable centimeter-level RTK fixes, given good reception and corrections.';
+ }else if(km<=20){
+  message='Moderate-range search: centimeter-level RTK may be possible, but fix reliability becomes more dependent on local conditions.';
+ }else if(km<=30){
+  message='Extended-range search: stations near the edge exceed ~20 km. RTK fixes may become unreliable; meter-level errors are possible after losing fix.';
+ }else{
+  message='Long-range search: faraway stations may give unreliable RTK fixes and meter-level errors. Prefer a closer base when available.';
+ }
+ note.textContent=message;
+ note.classList.toggle('caution',km>20);
+}
+function syncDistanceUnits(){
+ const point=state.site||state;
+ const regional=isUSPoint(point.lat,point.lon);
+ if(regional===useUSUnits)return;
+ const previousKm=radiusKm();useUSUnits=regional;
+ const steps=radiusSteps(),factor=useUSUnits?KM_PER_MILE:1;
+ let index=0;for(let i=1;i<steps.length;i++)if(Math.abs(steps[i]*factor-previousKm)<Math.abs(steps[index]*factor-previousKm))index=i;
+ $('radius').value=String(index);refreshRadiusLabel();applyFilters();
+}
+function zoomForRadius(lat,km){
+ // Keep the full search circle within approximately 70% of the smaller map dimension.
+ const availablePixels=Math.max(65,Math.min(width,height)*.34);
+ const radiusMeters=Math.max(1,km*1000);
+ const zoomLevel=Math.log2(availablePixels*156543.03392*Math.cos(lat*Math.PI/180)/radiusMeters);
+ return clamp(Math.floor(zoomLevel),2,19);
+}
+function accuracyText(km){
+ // Illustrative horizontal RTK assumption: 1 cm + 1 ppm of baseline distance.
+ const staticMm=10+km,lo=2*staticMm,hi=3*staticMm;
+ return {staticMm:staticMm.toFixed(1),lowMm:lo.toFixed(1),highMm:hi.toFixed(1),
+  staticIn:(staticMm/25.4).toFixed(1),lowIn:(lo/25.4).toFixed(1),highIn:(hi/25.4).toFixed(1)};
+}
+function baselineReliabilityNote(km){
+ if(km<=NOMINAL_BASELINE_KM)return '';
+ if(km<=LONG_BASELINE_KM)return '<div class="estimate-warning">Beyond the 20 km u-blox accuracy specification; these values are extrapolated.</div>';
+ return '<div class="estimate-warning">Long baseline (>30 km): RTK fix reliability and actual accuracy may deteriorate substantially. Values are extrapolated.</div>';
+}
+function popupAccuracyBlock(km){
+ const e=accuracyText(km);
+ return `<div class="popup-accuracy">Static: ±${e.staticMm} mm (±${e.staticIn} in)<br>`+
+ `At-speed estimate: ±${e.lowMm}–${e.highMm} mm (±${e.lowIn}–${e.highIn} in)</div>`+
+ baselineReliabilityNote(km);
+}
+function dist(a,b){const rd=Math.PI/180,dlat=(a.lat-b.lat)*rd,dlon=(a.lon-b.lon)*rd,q=Math.sin(dlat/2)**2+Math.cos(a.lat*rd)*Math.cos(b.lat*rd)*Math.sin(dlon/2)**2;return 6371.0088*2*Math.atan2(Math.sqrt(q),Math.sqrt(Math.max(0,1-q)))}
+function normalize(s,network,source={}){
+ const lat=Number(s.lat??s.latitude),lon=Number(s.lon??s.lng??s.longitude);
+ if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180||(lat===0&&lon===0))return null;
+ let caster=String(s.caster||'');let port=s.port??'';
+ if(!caster&&source.url){try{const url=new URL(source.url);caster=url.hostname;port=port||url.port||((url.protocol==='https:')?443:2101)}catch(e){/* No valid origin supplied. */}}
+ const carrier=String(s.carrier??'').trim();
+ const catalogDual=s.dualFreq??s.dual_frequency;
+ const catalogTriple=s.tripleFreq??s.triple_frequency;
+ const dualFreq=typeof catalogDual==='boolean'?catalogDual:carrier==='2'?true:null;
+ const tripleFreq=typeof catalogTriple==='boolean'?catalogTriple:null;
+ const rawFee=s.fee;
+ const fee=typeof rawFee==='boolean'?rawFee:String(rawFee??'').toUpperCase()==='Y'?true:String(rawFee??'').toUpperCase()==='N'?false:null;
+ const accessNote=String(s.userNote??source.userNote??source.credentials?.userNote??'');
+ return {
+  name:String(s.name??s.mountpoint??'?'),network:String(s.network??network??'Unknown'),lat,lon,
+  identifier:String(s.identifier??''),country:String(s.country??''),format:String(s.format??''),latitudePrecision:s.latitudePrecision??s.latPrec??null,longitudePrecision:s.longitudePrecision??s.lonPrec??null,
+  formatDetails:String(s.formatDetails??s.format_details??''),
+  constellations:String(s.constellations??s.navSystem??s.nav_system??''),carrier,
+  dualFreq,tripleFreq,fee,accessNote,
+  authentication:String(s.authentication??''),generator:String(s.generator??''),
+  bitrate:s.bitrate??null,nmeaRequired:s.nmeaRequired??null,solutionType:String(s.solutionType??''),
+  streamNetwork:String(s.streamNetwork??''),misc:String(s.misc??''),
+  caster,port:String(port),registration:String(s.registration??''),accessTier:String(s.accessTier??''),status:String(s.status??'catalog listing'),
+  fetchedAt:String(s.fetchedAt??source.fetched_at??''),sourceStatus:String(source.status??''),
+  origin:source.origin||s.origin||'catalog'
+ };
+}
+function normalizeCatalog(data){
+ const out=[],sources={};let origin='catalog';
+ if(Array.isArray(data.stations||data)){
+  origin=data.sources&&Object.values(data.sources).some(v=>v&&typeof v==='object'&&'ok' in v)?'live':'catalog';
+  for(const [name,meta] of Object.entries(data.sources||{}))sources[name]=meta;
+  for(const row of (data.stations||data)){
+   const meta={...(sources[row.network]||{}),origin};const s=normalize(row,row.network,meta);if(s)out.push(s);
+  }
+ }else if(data.sources&&typeof data.sources==='object'){
+  for(const [name,meta] of Object.entries(data.sources)){
+   sources[name]=meta;
+   for(const row of (meta.stations||[])){
+    const s=normalize(row,name,{...meta,origin:'catalog'});if(s)out.push(s);
+   }
+  }
+ }
+ return {stations:out,time:data.updated||data.fetched_at||'',sources};
+}
+function bandRank(s){return s.tripleFreq===true?3:s.dualFreq===true?2:s.carrier==='1'?1:0}
+function bandLabel(s){const tier=bandRank(s);return tier===3?'≥3 frequency bands reported':tier===2?'≥2 frequency bands reported':tier===1?'L1 phase reported':s.carrier==='0'?'No carrier phase reported':'Frequency bands not reported by source'}
+function constellationSet(s){return String(s.constellations).toUpperCase().split(/[+,/; ]+/).filter(Boolean)}
+function constellationLabel(s){const aliases={GLO:'GLONASS',GAL:'Galileo',BDS:'BeiDou',QZS:'QZSS',IRS:'NavIC'};const c=constellationSet(s);return c.length?c.map(x=>aliases[x]||x).join(', '):'Constellations not reported by source'}
+function networkKey(name){return String(name||'').trim().toLowerCase()}
+function policyFor(s){
+ const k=networkKey(s.sourceNetwork||s.network);
+ return NETWORK_POLICIES[k]||null;
+}
+function safeProviderLink(url,label){
+ if(!url||!(/^(https:\/\/|mailto:)/i.test(url)))return '';
+ return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+}
+function providerLinks(s){
+ const p=policyFor(s);if(!p)return '';
+ const links=[safeProviderLink(p.website,'Provider details')];
+ if(p.register&&p.register!==p.website)links.push(safeProviderLink(p.register,p.register.startsWith('mailto:')?'Request account':'Register / access account'));
+ else if(p.registration==='required')links.push(safeProviderLink(p.website,'Registration / access'));
+ return `<div class="provider-links">${links.filter(Boolean).join(' · ')}</div>`;
+}
+function providerFee(p){
+ return p.tier==='free'?(p.feeBasis==='user'?'Free (reported)':'Free'):p.tier==='free-tier'?'Free noncommercial':p.tier==='paid'?'Paid':'Fee unverified';
+}
+function providerRegistration(p){
+ return p.registration==='none'?'No account':p.registration==='required'?'Required':'Unverified';
+}
+function renderProviderDirectory(){
+ const body=$('providerDirectory');if(!body)return;
+ body.innerHTML=COMMON_US_NETWORKS.map(([key])=>{
+  const p=NETWORK_POLICIES[key];if(!p)return '';
+  const links=[safeProviderLink(p.website,'Info')];
+  if(p.register&&p.register!==p.website)links.push(safeProviderLink(p.register,p.register.startsWith('mailto:')?'Request':'Register'));
+  return `<tr><td title="${esc(p.note)}">${esc(p.name)}</td><td>${esc(providerFee(p))}</td><td>${esc(providerRegistration(p))}</td><td>${links.filter(Boolean).join(' · ')}</td></tr>`;
+ }).join('');
+}
+function updateProviderSelection(){
+ const k=$('network').value,box=$('providerSelection');if(!box)return;
+ if(k==='all'){box.innerHTML='<span>Select a network, or expand the U.S. provider directory below.</span>';return}
+ const p=NETWORK_POLICIES[networkKey(k==='Autocross Mobile Casters'?'centipede':k)];
+ if(!p){box.textContent='Provider registration and fee terms are not independently verified.';return}
+ box.innerHTML=`<strong>${esc(providerFee(p))} · ${esc(providerRegistration(p))}</strong><div>${esc(p.note)}</div>${providerLinks({network:k==='Autocross Mobile Casters'?'centipede':k})}`;
+}
+function accessTier(s){
+ const p=policyFor(s);
+ if(p?.tier==='free-tier')return 'free-tier'; // Fee flags do not override a documented noncommercial license.
+ if(s.fee===true||s.accessTier==='paid')return 'paid';
+ if(p?.tier==='free')return 'free';
+ if(s.fee===false)return 'free';
+ return p?.tier||'catalog-free-listed';
+}
+function registrationValue(s){
+ const provider=policyFor(s);
+ if(provider)return provider.registration;
+ return s.registration||'unknown';
+}
+function feeLabel(s){
+ const tier=accessTier(s);
+ return tier==='paid'?'Fee reported':tier==='free-tier'?'Free for qualified noncommercial use':tier==='free'?(policyFor(s)?.feeBasis==='user'?'Free (user-reported)':policyFor(s)?.tier==='free'?'Free (provider terms)':'No fee indicated by caster'):'Fee terms unverified';
+}
+function authLabel(s){const map={N:'None listed',B:'Basic authentication',D:'Digest authentication'};return map[s.authentication]||s.authentication||(s.accessNote?'See access conditions':'Not specified')}
+function registrationLabel(s){
+ const v=registrationValue(s);
+ return v==='email'?'Email username; no account':v==='required'?'Registration required':v==='none'?'No account required':'Not verified';
+}
+function accessNote(s){return [policyFor(s)?.note,s.accessNote].filter(Boolean).filter((x,i,a)=>a.indexOf(x)===i).join(' · ')}
+function labelStatus(s){return s.origin==='manual event location'?'Manual event coordinates; current stream status unknown':s.sourceStatus==='stale'?'Catalog source is stale; current status unknown':'Catalog listing; current stream status unknown'}
+function detailField(title,value){return `<div class="detail-field"><small>${esc(title)}</small><strong>${esc(value||'Not reported')}</strong></div>`}
+function roverSettings(s){
+ const host=s.caster||'',port=s.port||'2101';
+ const instructions=policyFor(s)?.note||'';
+ return {host,port:String(port),mountpoint:s.name,all:`Host: ${host||'not provided'}\nPort: ${port}\nMountpoint: ${s.name}\nNetwork: ${s.network}\nAccess: ${registrationLabel(s)}${instructions?'\nNote: '+instructions:''}`};
+}
+async function copyText(value){
+ try{
+  if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(value);return true}
+  const el=document.createElement('textarea');el.value=value;el.style.position='fixed';el.style.opacity='0';document.body.append(el);el.select();const ok=document.execCommand('copy');el.remove();return ok;
+ }catch(e){return false}
+}
+function showCopyResult(button,ok){const original=button.textContent;button.textContent=ok?'Copied':'Select text';setTimeout(()=>{button.textContent=original},1500)}
+function renderDetails(){
+ const s=state.selected,box=$('stationDetails');if(!s){box.hidden=true;$('stationPlaceholder').hidden=false;return}
+ box.hidden=false;$('stationPlaceholder').hidden=true;
+ const date=s.fetchedAt||state.sourceTime||'Not provided';
+ const km=state.site?dist(state.site,s):null;
+ const site=km===null?null:lengthLabel(km);
+ const est=km===null?null:accuracyText(km);
+ const estimateBlock=km===null?`<div class="distance-hero"><div class="range-head">Select a site to calculate distance and accuracy</div></div>`:
+ `<div class="distance-hero"><div class="range-head">${esc(site)} from site</div>
+ <div class="accuracy-main">Best-case static: ±${est.staticMm} mm (±${est.staticIn} in)</div>
+ <div class="accuracy-main">Typical at-speed estimate: ±${est.lowMm}–${est.highMm} mm (±${est.lowIn}–${est.highIn} in)</div>
+ ${baselineReliabilityNote(km)}
+ <div class="estimate-note">Illustrative horizontal estimate using 10 mm + 1 ppm × baseline; at-speed range assumes 2–3× static. Not a measurement or guarantee. u-blox qualifies this formula to 20 km.</div></div>`;
+ const sourceUrl=s.caster?`${s.caster}:${s.port||2101}`:'Not reported';
+ const conn=roverSettings(s);
+ box.innerHTML=`<div class="detail-title">${esc(s.name)} <span class="badge">${esc(s.network)}</span></div>
+ ${estimateBlock}
+ <div class="detail-grid">
+ ${detailField('Access / fees',feeLabel(s))}
+ ${detailField('Registration',registrationLabel(s))}
+ ${detailField('Authentication',authLabel(s))}
+ ${detailField('Frequency bands (reported)',bandLabel(s))}
+ ${detailField('GNSS constellations (reported)',constellationLabel(s))}
+ ${detailField('Correction format',s.format)}
+ ${detailField('RTCM message schedule',s.formatDetails||'Not reported')}
+ ${detailField('NTRIP caster',sourceUrl)}
+ ${detailField('Mountpoint',s.name)}
+ ${detailField('Stream status',labelStatus(s))}
+ ${detailField('Source checked / snapshot',date)}
+ ${detailField('Station location',s.lat.toFixed(6)+', '+s.lon.toFixed(6))}
+ ${s.latitudePrecision!==null||s.longitudePrecision!==null?detailField('Source coordinate precision',`${s.latitudePrecision??'?'} lat / ${s.longitudePrecision??'?'} lon decimal places`):''}
+ ${s.bitrate?detailField('Advertised bitrate',String(s.bitrate)+' bits/s'):''}
+ ${s.generator?detailField('Generator',s.generator):''}
+ ${accessNote(s)?detailField('Access instructions',accessNote(s)):''}
+ </div>
+ ${providerLinks(s)||'<p class="detail-note">Provider link unavailable; terms not independently confirmed.</p>'}
+ <p class="detail-note">Copy the caster settings for your NTRIP rover. A station in this catalog is not necessarily online.</p>
+ <div class="config-block" id="roverConfig">${esc(conn.all)}</div>
+ <div class="copy-row"><select id="copyField" aria-label="NTRIP setting to copy"><option value="all">Full rover configuration</option><option value="host">Host</option><option value="port">Port</option><option value="mountpoint">Mountpoint</option></select><button type="button" id="copyValue">Copy</button></div>`;
+ $('copyValue').onclick=async()=>{const button=$('copyValue');const v=conn[$('copyField').value];showCopyResult(button,await copyText(v))};
+}
+function status(text,error=false){$('status').textContent=text;$('status').className='card status '+(error?'error':'ok')}
+async function requestJSON(url,timeout=12500){const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),timeout);try{const r=await fetch(url,{cache:'no-store',signal:ctrl.signal});if(!r.ok)throw Error(`HTTP ${r.status}`);return await r.json()}finally{clearTimeout(timer)}}
+const CACHE_FIELDS=['name','network','lat','lon','country','format','caster','port','status','identifier','formatDetails','constellations','carrier','dualFreq','tripleFreq','fee','registration','accessTier','accessNote','authentication','generator','bitrate','nmeaRequired','solutionType','streamNetwork','misc','fetchedAt','sourceStatus','origin','latitudePrecision','longitudePrecision'];
+function cache(data){try{const rows=data.stations.map(s=>CACHE_FIELDS.map(k=>s[k]));localStorage.setItem('rtk-atlas-cache',JSON.stringify({time:data.time,stored:new Date().toISOString(),fields:CACHE_FIELDS,rows}))}catch(e){/* Storage might be unavailable or quota-limited. */}}
+function readCache(){try{const c=JSON.parse(localStorage.getItem('rtk-atlas-cache')||'null');if(!c||!Array.isArray(c.rows))return null;const fields=c.fields||['name','network','lat','lon','country','format','caster','port','status'];return {time:c.time,stored:c.stored,sources:{},stations:c.rows.map(row=>{const obj={};fields.forEach((k,i)=>obj[k]=row[i]);obj.origin='cached catalog';return normalize(obj,obj.network,{origin:'cached catalog'})}).filter(Boolean)}}catch(e){return null}}
+function makeMobileStation(entry,catalogRows){
+ const match=catalogRows.find(s=>s.name.toLowerCase()===entry.name.toLowerCase()&&
+  (networkKey(s.network)===networkKey(entry.sourceNetwork)||s.caster===entry.host));
+ const custom=Number.isFinite(entry.lat)&&Number.isFinite(entry.lon)&&!(entry.lat===0&&entry.lon===0);
+ const location=match|| (custom?{lat:entry.lat,lon:entry.lon}:null);
+ if(!location)return null;
+ return {...(match||{}),name:entry.name,network:MOBILE_NETWORK,sourceNetwork:entry.sourceNetwork,
+  lat:location.lat,lon:location.lon,caster:entry.host,port:String(entry.port),
+  origin:match?match.origin:'manual event location',
+  status:match?'Geolocated in catalog':'Operator-supplied event position; unverified',
+  fetchedAt:match?.fetchedAt||'',sourceStatus:match?.sourceStatus||'',
+  dualFreq:match?.dualFreq??null,tripleFreq:match?.tripleFreq??null,
+  carrier:match?.carrier||'',constellations:match?.constellations||'',format:match?.format||'',
+  fee:match?.fee??null,authentication:match?.authentication||'',accessNote:match?.accessNote||'',
+  latitudePrecision:match?.latitudePrecision??null,longitudePrecision:match?.longitudePrecision??null};
+}
+function displayStations(rows){
+ const discovered=[];
+ for(const entry of MOBILE_CASTERS){const matched=makeMobileStation(entry,rows);if(matched)discovered.push(matched)}
+ // Do not duplicate an existing public caster point when it is reclassified as a mobile mountpoint.
+ const out=rows.filter(s=>!discovered.some(m=>s.name.toLowerCase()===m.name.toLowerCase()&&networkKey(s.network)===networkKey(m.sourceNetwork)));
+ return out.concat(discovered);
+}
+function updateMobileCard(){
+ const active=$('network').value===MOBILE_NETWORK;
+ $('mobileCard').hidden=!active;
+ if(!active)return;
+ const current=$('mobileCaster').value;
+ $('mobileCaster').replaceChildren(...MOBILE_CASTERS.map(m=>new Option(m.name,m.name)));
+ if(MOBILE_CASTERS.some(m=>m.name===current))$('mobileCaster').value=current;
+ const entry=MOBILE_CASTERS.find(m=>m.name===$('mobileCaster').value)||MOBILE_CASTERS[0];
+ if(!entry){$('mobileInfo').textContent='No mobile casters configured.';return}
+ const station=state.stations.find(s=>s.network===MOBILE_NETWORK&&s.name===entry.name);
+ $('mobileInfo').textContent=`${entry.host}:${entry.port}/${entry.name} · ${station?'Position available ('+(station.origin==='manual event location'?'manual':'catalog')+')':'Location unavailable; no marker until coordinates are provided.'} ${policyFor({network:entry.sourceNetwork})?.note||''}`;
+ if(station){state.selected=station;renderDetails()}else{state.selected=null;renderDetails()}
+ $('popup').hidden=true;
+}
+function rebuildNetworks(){
+ const selected=$('network').value,allowed=state.stations.filter(s=>$('access').value!=='free'||accessTier(s)!=='paid');
+ const networkNames=[...new Set(allowed.map(s=>s.network))];
+ const select=$('network');
+ const all=new Option('All networks (access filter below)','all');select.replaceChildren(all);
+ const us=document.createElement('optgroup');us.label='Common public US casters';
+ us.append(new Option(MOBILE_NETWORK,MOBILE_NETWORK));
+ const popular=[];
+ for(const [key,label] of COMMON_US_NETWORKS)if(networkNames.includes(key)){us.append(new Option(label,key));popular.push(key)}
+ select.append(us);
+ const others=document.createElement('optgroup');others.label='Other listed networks';
+ for(const n of networkNames.filter(n=>n!==MOBILE_NETWORK&&!popular.includes(n)).sort((a,b)=>a.localeCompare(b)))others.append(new Option(n,n));
+ if(others.children.length)select.append(others);
+ select.value=[...select.options].some(o=>o.value===selected)?selected:'all';
+ updateMobileCard();updateProviderSelection();
+}
+async function refresh(){
+ const serial=++dataSerial;status('Downloading public station catalog…');let warnings=[];
+ try{
+  let data=null,method='catalog';const failed=[];
+  for(const url of CATALOG_URLS){
+   try{const norm=normalizeCatalog(await requestJSON(url,11500));if(!norm.stations.length)throw Error('Empty catalog');data=norm;break}
+   catch(e){failed.push(new URL(url).hostname+': '+e.message)}
+  }
+  if(!data){const old=readCache();if(old&&old.stations.length){data=old;method='cached';warnings.push('Catalog download failed; showing previously cached entries.')}else throw Error('Catalog download failed ('+failed.join('; ')+'). Try HTTPS hosting.')}
+  if(serial!==dataSerial)return;
+  state.stations=displayStations(data.stations);state.mode=method;state.sourceTime=data.time;state.sourceMeta=data.sources||{};state.selected=null;renderDetails();
+  if(method!=='cached')cache(data);
+  rebuildNetworks();
+  $('count').textContent=state.stations.length.toLocaleString();$('netcount').textContent=new Set(state.stations.map(s=>s.network)).size.toLocaleString();
+  const snapshotAgeDays=data.time?(Date.now()-Date.parse(data.time))/86400000:NaN;
+  if(Number.isFinite(snapshotAgeDays)&&snapshotAgeDays>3)warnings.push(`Catalog snapshot is ${Math.floor(snapshotAgeDays)} days old; some stations may be outdated.`);
+  status([...warnings,method==='cached'?'Offline cache; current status unknown':'Loaded public catalog; current stream status unverified',
+   `Source timestamp: ${data.time||'not provided'}`,`${state.stations.length.toLocaleString()} geolocated entries. Paid-only services are not directly queried.`].join('\n'));
+  applyFilters();
+ }catch(e){if(serial!==dataSerial)return;status('ERROR: '+e.message,true);if(!state.stations.length){$('count').textContent='0';$('netcount').textContent='0';$('shown').textContent='0'}}finally{/* Catalog refresh occurs on page load. */}
+}
+function applyFilters(){
+ const query=$('search').value.toLowerCase().trim(),net=$('network').value,site=state.site,limit=radiusKm();
+ const fee=$('access').value,frequency=$('frequency').value,constellation=$('constellation').value,registration=$('registration').value;
+ state.filtered=state.stations.filter(s=>{
+  const tier=accessTier(s),reg=registrationValue(s);
+  return (net==='all'||s.network===net)&&
+   (fee==='all'||(fee==='free'&&tier!=='paid')||(fee==='fee'&&tier==='paid')||(fee==='unknown'&&(tier==='catalog-free-listed'||tier==='unverified')))&&
+   (registration==='all'||(registration==='required'&&(reg==='required'||reg==='email'))||(registration==='none'&&reg==='none')||(registration==='unknown'&&reg==='unknown'))&&
+   (!query||[s.name,s.network,s.country,s.caster,s.identifier].some(x=>String(x).toLowerCase().includes(query)))&&
+   (frequency==='all'||(frequency==='triple'&&bandRank(s)>=3)||(frequency==='dual'&&bandRank(s)>=2)||(frequency==='unknown'&&bandRank(s)===0))&&
+   (constellation==='all'||constellationSet(s).includes(constellation))&&
+   (!$('nearonly').checked||!site||dist(site,s)<=limit);
+ });
+ if(state.selected&&!state.filtered.includes(state.selected)){state.selected=null;renderDetails();$('popup').hidden=true}
+ $('resultTitle').textContent=`(${state.filtered.length.toLocaleString()} matching${site?.label?' · from '+site.label:''})`;if(state.selected)renderDetails();scheduleDraw();nearest();
+}
+function nearest(){const box=$('results');box.replaceChildren();if(!state.site){box.textContent='Tap the map or enter site coordinates.';return}
+ const entries=state.filtered.map(s=>({s,km:dist(state.site,s)})).sort((a,b)=>a.km-b.km).slice(0,15);
+ if(!entries.length){box.textContent='No matching stations.';return}
+ for(const {s,km} of entries){const b=document.createElement('button');b.className='result';b.innerHTML=`${esc(s.name)} <span class="badge">${esc(s.network)}</span><small>${esc(lengthLabel(km))} · ${esc(bandLabel(s))} · ${esc(feeLabel(s))}</small>`;
+ b.onclick=()=>{showStation(s);$('detailsSection').open=true;if(window.matchMedia('(max-width:760px)').matches)$('detailsSection').scrollIntoView({behavior:'smooth',block:'start'})};box.append(b)}
+}
+function showStation(s){
+ state.selected=s;$('detailsSection').open=true;renderDetails();scheduleDraw();
+ const km=state.site?dist(state.site,s):null;
+ const distance=km===null?'<div class="popup-distance">Choose a site to calculate distance and accuracy</div>':
+ `<div class="popup-distance">${esc(lengthLabel(km))} from site</div>${popupAccuracyBlock(km)}`;
+ $('popupContent').innerHTML=`${distance}<div class="popup-station"><strong>${esc(s.name)}</strong> <span class="badge">${esc(s.network)}</span></div>`+
+ `<div>${esc(bandLabel(s))} · ${esc(constellationLabel(s))}</div><div>${esc(feeLabel(s))}</div>`+
+ `${providerLinks(s)}<small>${esc(labelStatus(s))}. See station details for estimation assumptions.</small>`;
+ $('popup').hidden=false;
+}
+function setSite(lat,lon,kind='manual',siteLabel=''){
+ if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180){alert('Invalid latitude, longitude.');return}
+ state.site={lat,lon,kind,label:siteLabel||''};$('site').value=lat.toFixed(6)+', '+lon.toFixed(6);
+ $('popup').hidden=true;syncDistanceUnits();
+ // Manually selected map/coordinate/geolocation origins never move the map.
+ // Selecting an actual venue flag or a venue from a dropdown flies to it.
+ if(kind==='venue'||kind==='track')animateToLocation(lat,lon,zoomForRadius(lat,radiusKm()));
+ else cancelViewAnimation();
+ if(state.selected)renderDetails();applyFilters();
+}
+function onMapTap(x,y,touch=false){
+ const hit=mapHit(x,y,touch);
+ if(hit?.kind==='station'){showStation(hit.value);return}
+ if(hit?.kind==='location'){useLocationMarker(hit.value);return}
+ const g=screenToGeo(x,y);setSite(g.lat,g.lon);
+}
+// Pointer Events: a short tap selects a marker; moving >=8px starts panning.
+// Do not pan during tap jitter, or accidentally turn the end of a pinch into a tap.
+let pinchDistance=0;
+mapEl.addEventListener('pointerdown',e=>{
+ if(e.target.closest('.map-ui,.popup'))return;
+ cancelViewAnimation();
+ if(pointerMap.size===0)gestureCancelled=false;
+ mapEl.setPointerCapture(e.pointerId);
+ pointerMap.set(e.pointerId,{x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,dragging:false,type:e.pointerType});
+ mapEl.classList.remove('is-marker');
+ if(pointerMap.size===2){
+  gestureCancelled=true;
+  const p=[...pointerMap.values()];pinchDistance=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);
+ }
+});
+mapEl.addEventListener('pointermove',e=>{
+ if(!pointerMap.has(e.pointerId)){updateMapCursor(e);return}
+ const p=pointerMap.get(e.pointerId),distance=Math.hypot(e.clientX-p.startX,e.clientY-p.startY);
+ if(pointerMap.size===1){
+  if(!p.dragging&&distance>=8){p.dragging=true;mapEl.classList.add('is-panning')}
+  if(p.dragging){offsetCenter(e.clientX-p.x,e.clientY-p.y)}
+ }else if(pointerMap.size===2){
+  const other=[...pointerMap.entries()].find(([id])=>id!==e.pointerId)?.[1];
+  if(other){
+   const next=Math.hypot(e.clientX-other.x,e.clientY-other.y);
+   if(pinchDistance&&next/pinchDistance>=1.32){zoom(1);pinchDistance=next}
+   else if(pinchDistance&&next/pinchDistance<=.76){zoom(-1);pinchDistance=next}
+  }
+ }
+ p.x=e.clientX;p.y=e.clientY;
+});
+function releasePointer(e){
+ const p=pointerMap.get(e.pointerId);if(!p)return;
+ const tap=pointerMap.size===1&&!p.dragging&&!gestureCancelled;
+ pointerMap.delete(e.pointerId);
+ if(pointerMap.size===0){pinchDistance=0;mapEl.classList.remove('is-panning')}
+ if(tap){const {x,y}=pointerLocation(e);onMapTap(x,y,p.type==='touch')}
+ else updateMapCursor(e);
+}
+mapEl.addEventListener('pointerup',releasePointer);
+mapEl.addEventListener('pointercancel',e=>{pointerMap.delete(e.pointerId);gestureCancelled=true;mapEl.classList.remove('is-panning')});
+mapEl.addEventListener('pointerleave',()=>mapEl.classList.remove('is-marker'));
+mapEl.addEventListener('wheel',e=>{e.preventDefault();const b=mapEl.getBoundingClientRect();zoom(e.deltaY<0?1:-1,e.clientX-b.left,e.clientY-b.top)},{passive:false});
+$('zoomIn').onclick=()=>zoom(1);$('zoomOut').onclick=()=>zoom(-1);
+$('basemap').onchange=e=>{switchBasemap(e.target.value);$('mapHint').textContent='Tap colored dots for NTRIP details · flags search nearby casters · drag to pan';clearTiles();scheduleDraw()};
+$('closePopup').onclick=()=>{$('popup').hidden=true};
+$('locate').onclick=()=>{const m=$('site').value.match(/^\s*([+-]?\d+(?:\.\d+)?)\s*[, ]\s*([+-]?\d+(?:\.\d+)?)\s*$/);if(!m)return alert('Enter latitude, longitude in decimal degrees.');setSite(+m[1],+m[2])};
+$('mypos').onclick=()=>{if(!navigator.geolocation)return alert('Geolocation unavailable.');navigator.geolocation.getCurrentPosition(p=>setSite(p.coords.latitude,p.coords.longitude),e=>alert('Geolocation failed: '+e.message),{timeout:12000,enableHighAccuracy:true})};
+$('radius').oninput=()=>{refreshRadiusLabel();if(state.selected)renderDetails();applyFilters()};
+for(const id of ['network','search','nearonly','frequency','constellation','registration'])$(id).addEventListener(id==='search'?'input':'change',()=>{if(id==='network'){updateMobileCard();updateProviderSelection()}applyFilters()});
+$('access').addEventListener('change',()=>{rebuildNetworks();applyFilters()});
+$('mobileCaster').onchange=updateMobileCard;
+$('mobileCopy').onclick=async()=>{const entry=MOBILE_CASTERS.find(m=>m.name===$('mobileCaster').value);if(!entry)return;const r=roverSettings({name:entry.name,network:MOBILE_NETWORK,sourceNetwork:entry.sourceNetwork,caster:entry.host,port:entry.port});showCopyResult($('mobileCopy'),await copyText(r[$('mobileCopyField').value]))};
+$('clear').onclick=()=>{state.site=null;$('site').value='';$('popup').hidden=true;syncDistanceUnits();if(state.selected)renderDetails();applyFilters()};
+$('export').onclick=()=>{const keys=['network','name','lat','lon','country','status','format','formatDetails','constellations','carrier','dualFreq','tripleFreq','fee','authentication','registration','accessTier','accessNote','fetchedAt','caster','port','distance_km'];const rows=[keys.join(','),...state.filtered.map(s=>keys.map(k=>{const value=k==='distance_km'?(state.site?dist(state.site,s).toFixed(3):''):s[k];return '"'+String(value??'').replace(/"/g,'""')+'"'}).join(','))];const a=document.createElement('a');const href=URL.createObjectURL(new Blob([rows.join('\r\n')],{type:'text/csv;charset=utf-8'}));a.href=href;a.download='rtk-caster-atlas.csv';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1000)};
+/* ======================================================================
+   AUTOCROSS VENUE DIRECTORY
+   Each row: [name, region, category, latitude, longitude, source,
+              coordinate type, location note, source URL].
+   Points can be entrance coordinates, airport reference points or facility
+   centers. None should be assumed to locate the event course itself.
+   Edit this list and autocross_venues.csv together when adding sites.
+   ====================================================================== */
+const SEED_VENUES=[
+ ["Langley Speedway", "Hampton, VA", "ODR-SCCA", 37.08639, -76.38667, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", "https://www.motorsportreg.com/venues/langley-speedway-hampton-va"],
+ ["Southampton Motor Speedway", "Capron, VA", "ODR-SCCA", 36.6997, -77.2257, "GeoNames / Mapcarta (approx facility)", "mapped facility center (approximate)", "ODR-SCCA event runs on the oval track and infield, not a surrounding parking lot.", "https://nrscca.motorsportreg.com/events/odr-scca-solo-autocross-6-at-sms-southampton-motor-speedway-old-dominion-555642"],
+ ["Meadow Event Park", "Doswell, VA", "ODR-SCCA", 37.84901, -77.41717, "OSM / Mapcarta", "mapped facility center (approximate)", "WDCR events identify Farm Bureau Center parking area; these coordinates are the park center, not that specific lot.", "https://wmr-scca.motorsportreg.com/events/wdcr-2026-ax-championship-event-3-meadow-center-scca-washington-dc-autocross-285256"],
+ ["North Carolina Center for Automotive Research (NCCAR)", "Garysburg, NC", "ODR-SCCA", 36.474818, -77.586468, "THSCC MotorsportReg event directions", "published event GPS (entrance)", "Event navigation coordinate at NCCAR; competition surface is within facility.", "https://www.motorsportreg.com/events/thscc-autocross-points-event-9-10-nccar-tarheel-sports-car-club-593539"],
+ ["Virginia Motorsports Park", "North Dinwiddie, VA", "Regional autocross", 37.16712, -77.52825, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", "https://www.motorsportreg.com/orgs/virginia-motor-sports-club"],
+ ["Virginia International Raceway", "Alton, VA", "Regional autocross", 36.56169, -79.20469, "Wikidata coordinates", "facility center (approximate)", "Road course complex; autocross area may differ.", "https://www.wikidata.org/wiki/Q847633"],
+ ["Summit Point Motorsports Park", "Summit Point, WV", "Regional autocross", 39.23786, -77.96973, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", ""],
+ ["Langley Kart Club", "Hampton, VA", "Regional autocross", 37.08639, -76.38667, "Hampton Roads Kart Club directions", "shared facility / approximate", "Club directions identify Langley Speedway. Alias shares Speedway facility location; separate kart pad not resolved.", "https://www.hrkc.com/contact/directions/"],
+ ["Winston-Salem Fairgrounds", "Winston-Salem, NC", "Regional autocross", 36.1242773, -80.2542849, "MotorsportReg venue directions", "event directions map pin", "423 27th Street directions map pin; not necessarily the course lot.", "https://www.motorsportreg.com/venues/winston-salem-fairgrounds-north-carolina"],
+ ["Spence Field", "Moultrie, GA", "SCCA National Solo", 31.13769, -83.70406, "OpenStreetMap / Mapcarta", "airfield center (approximate)", "290-G Harper Blvd. Event layout can use different ends of the airfield.", "https://mapcarta.com/20793488"],
+ ["zMAX Dragway", "Concord, NC", "SCCA National Solo", 35.36085, -80.6872, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", ""],
+ ["Naval Air Station Chase Field", "Beeville, TX", "SCCA National Solo", 28.36186, -97.65748, "OpenStreetMap / Mapcarta", "airfield center (approximate)", "MotorsportReg identifies Chase Field as autocross venue; pad position unconfirmed.", "https://mapcarta.com/31165084"],
+ ["Lincoln Airpark", "Lincoln, NE", "SCCA National Solo", 40.8486272, -96.7715285, "SCCA Solo Nationals arrival directions", "published event GPS (entrance)", "Official Solo Nationals gate/entrance, not east/west competition pad.", "https://www.scca.com/articles/2015352-running-at-solo-nationals-a-refresher-course"],
+ ["Crows Landing Air Facility", "Crows Landing, CA", "SCCA National Solo", 37.408063, -121.109438, "SCCA / PCA autocross site directions", "published event GPS (entrance)", "Ike Crow Road / Bell Road entrance. Do not approach via Bell Road.", "https://www.scca.com/pages/2026-crows-landing-national-tour-location-site-details"],
+ ["Bristol Motor Speedway", "Bristol, TN", "SCCA National Solo", 36.51563, -82.25697, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", ""],
+ ["Hampton Mills", "Packwood, WA", "SCCA National Solo", 46.596105, -121.681161, "PCA Pacific Northwest autocross directions", "club-published entrance GPS", "Hampton Mills Packwood lumber mill site entrance; course is farther inside.", "https://pnwr.clubexpress.com/Autocross"],
+ ["Grissom Aeroplex", "Bunker Hill, IN", "SCCA National Solo", 40.65492, -86.133425, "National Autocross News site guide", "published autocross entrance GPS", "South Airtech Drive access / former alert-pad area; water-tower entrance.", "https://naxn.org/pedia/grissom-aeroplex/"],
+ ["Seneca Army Depot", "Romulus, NY", "SCCA National Solo", 42.7050413, -76.8827354, "MotorsportReg venue navigation link", "MotorsportReg directions map pin", "Pin from venue directions. Event pages specify 6471 NY-96A while venue listing says 6600; verify course entrance.", "https://www.motorsportreg.com/venues/seneca-army-depot-romulus-ny"],
+ ["Las Vegas Motor Speedway", "Las Vegas, NV", "SCCA National Solo", 36.2684, -115.0191, "OpenStreetMap / Mapcarta", "facility center (approximate)", "SCCA autocross uses Metro Lot; ProSolo 2026 approach is Gate 8, NOT this oval center.", "https://mapcarta.com/26900046"],
+ ["Atlanta Motor Speedway", "Hampton, GA", "SCCA National Solo", 33.38879, -84.31664, "OSM / Mapcarta", "mapped facility center (approximate)", "Facility center from prior source; exact autocross course or lot not located.", ""],
+ ["Northwest Stadium", "Landover, MD", "SCCA National Solo", 38.907778, -76.864444, "Wikidata stadium coordinates", "stadium center (approximate)", "Former FedExField; no specific autocross parking lot verified.", "https://www.wikidata.org/wiki/Q583085"],
+ ["Toledo Express Airport", "Swanton, OH", "SCCA National Solo", 41.5864, -83.81292, "OpenStreetMap / Mapcarta", "airport center (approximate)", "Airport reference point; event competition pavement not resolved.", "https://mapcarta.com/22693770"],
+ ["Brunswick Executive Airport", "Brunswick, ME", "SCCA National Solo", 43.8923551, -69.9388297, "Town of Brunswick airport master plan", "FAA airport reference point", "FAA airport reference position from master plan; actual autocross pad differs.", "https://www.brunswickme.gov/AgendaCenter/ViewFile/Item/2110?fileID=30981"],
+ ["The Family Arena", "St. Charles, MO", "SCCA National Solo", 38.7478, -90.50935, "OpenStreetMap / Mapcarta", "arena center (approximate)", "Event lot not separately identified.", "https://mapcarta.com/27498202"],
+ ["Route 66 Raceway", "Joliet, IL", "SCCA National Solo", 41.46294, -88.06977, "OpenStreetMap / Mapcarta", "raceway center (approximate)", "Drag race complex; exact Solo lot needs confirmation.", "https://mapcarta.com/W33121012"],
+ ["I-X Center", "Cleveland, OH", "Historic autocross", 41.39847, -81.85317, "OpenStreetMap / Mapcarta", "facility center (approximate)", "Historic autocross site near Cleveland airport; specific event pad not identified.", "https://mapcarta.com/W53757587"],
+ ["Meadowlands Sports Complex", "East Rutherford, NJ", "Historic autocross", 40.81696, -74.07814, "OpenStreetMap / Mapcarta", "complex center (approximate)", "Large complex with multiple lots; autocross venue position not confirmed.", "https://mapcarta.com/W230171137"],
+ ["Arizona Motorsports Park", "Litchfield Park, AZ", "Historic autocross", 33.5151, -112.3901, "Track coordinates; MotorsportReg autocross records", "racetrack center (approximate)", "PCA autocross events have used AMP skidpad or track; center is not the skidpad.", "https://airdensityonline.com/track-results/Arizona_Motorsports_Park/"],
+ ["St. Charles Family Arena", "St. Charles, MO", "Historic autocross", 38.7478, -90.50935, "OpenStreetMap / Mapcarta", "same facility as The Family Arena", "Historic alias/duplicate of The Family Arena; plotted once.", "https://mapcarta.com/27498202"]
+];
+const VENUE_CACHE_KEY='rtk-caster-atlas-venues';
+const NOMINATIM_URL='https://nominatim.openstreetmap.org/search';
+const OVERPASS_URLS=['https://overpass.kumi.systems/api/interpreter','https://overpass-api.de/api/interpreter'];
+const RACECAPTURE_URL='https://raw.githubusercontent.com/autosportlabs/RaceCapture-Pro_firmware/master/data/start_finish_points/sf_data.csv';
+const RACEAPI_URL='https://ligasavbrasil.github.io/RaceTracksAPI/tracks.json';
+const TRACK_STORAGE='rtk-atlas-us-track-scan';
+const TRACK_SCAN_PROGRESS='rtk-atlas-us-track-scan-regions';
+let venueLookupActive=false,trackLookupActive=false,trackCancel=false,trackImportStatus='';
+const scannedRegions=new Set();
+const USA_REGIONS=[];
+// Small batches are deliberately user-triggered to avoid a site-wide Overpass query on every page load.
+for(const [a,b] of [[24,33],[33,42],[42,50]])for(const [c,d] of [[-125,-113],[-113,-101],[-101,-89],[-89,-77],[-77,-66]]) USA_REGIONS.push([a,c,b,d]);
+for(const [a,b] of [[51,61],[61,72]])for(const [c,d] of [[-180,-162],[-162,-144],[-144,-129]])USA_REGIONS.push([a,c,b,d]);
+USA_REGIONS.push([18,-161,23,-154]);
+
+function initVenues(){
+ let saved={};try{saved=JSON.parse(localStorage.getItem(VENUE_CACHE_KEY)||'{}')||{}}catch(e){}
+ state.venues=SEED_VENUES.map((v,i)=>{
+  const item={id:i,name:v[0],region:v[1],category:v[2],lat:v[3],lon:v[4],source:v[5],precision:v[6]||'unresolved',note:v[7]||'',sourceUrl:v[8]||''};
+  const c=saved[item.name+'|'+item.region];if(!Number.isFinite(item.lat)&&c&&Number.isFinite(c.lat)&&Number.isFinite(c.lon)&&Math.abs(c.lat)<=90&&Math.abs(c.lon)<=180){item.lat=c.lat;item.lon=c.lon;item.precision='geocoded facility';item.source='Nominatim / OSM'}
+  return item;
+ });
+ const select=$('venue');for(const cat of [...new Set(state.venues.map(v=>v.category))]){
+  const group=document.createElement('optgroup');group.label=cat;
+  for(const v of state.venues.filter(x=>x.category===cat)){
+   const opt=document.createElement('option');opt.value=String(v.id);opt.textContent=`${v.name} — ${v.region}${Number.isFinite(v.lat)?'':' · locate on selection'}`;group.append(opt)
+  }select.append(group);
+ }
+ $('venue').onchange=()=>{if(selectedVenue())void useSelectedVenue()};
+ $('showVenues').onchange=scheduleDraw;$('showTracks').onchange=scheduleDraw;
+ $('loadTracks').onclick=()=>$('trackAction').value==='nation'?loadNationwideTracks():loadTracksInView();
+ $('stopTracks').onclick=()=>{trackCancel=true;$('trackStatus').textContent='Stopping after the current query…'};
+ $('trackFilter').onchange=refreshTrackView;
+ $('trackSelect').onchange=()=>{const t=state.tracks.find(x=>x.key===$('trackSelect').value);if(!t)return;setSite(t.lat,t.lon,'track',t.name);showTrackStatus(t);showOriginSearch(t)};
+ loadSavedTracks();loadOpenTrackCatalogs();
+}
+function selectedVenue(){const raw=$('venue').value;return raw===''?null:state.venues.find(v=>v.id===Number(raw))||null}
+async function useSelectedVenue(){
+ const venue=selectedVenue();if(!venue)return $('venueStatus').textContent='Select a venue first.';
+ if(!Number.isFinite(venue.lat)){
+  if(venueLookupActive)return;
+  venueLookupActive=true;$('venue').disabled=true;
+  $('venueStatus').textContent=`Locating ${venue.name} via OpenStreetMap…`;
+  try{
+   const q=`${venue.name}, ${venue.region}, USA`;
+   const url=NOMINATIM_URL+'?format=jsonv2&limit=3&q='+encodeURIComponent(q);
+   const response=await fetch(url,{headers:{Accept:'application/json'}});
+   if(!response.ok)throw Error('Geocoder HTTP '+response.status);
+   const candidates=await response.json();if(!Array.isArray(candidates)||!candidates.length)throw Error('No location match returned');
+   // Nominatim returns ranked results; use geographic feature center, NOT an autocross course location.
+   const choice=candidates[0],lat=Number(choice.lat),lon=Number(choice.lon);
+   if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)throw Error('Invalid coordinates');
+   venue.lat=lat;venue.lon=lon;venue.precision='geocoded facility';venue.source='Nominatim / OSM';
+   try{const saved=JSON.parse(localStorage.getItem(VENUE_CACHE_KEY)||'{}')||{};saved[venue.name+'|'+venue.region]={lat,lon};localStorage.setItem(VENUE_CACHE_KEY,JSON.stringify(saved))}catch(e){}
+   const opt=$('venue').querySelector('option[value="'+venue.id+'"]');if(opt)opt.textContent=`${venue.name} — ${venue.region}`;
+  }catch(e){$('venueStatus').textContent=`Could not locate ${venue.name}: ${e.message}. You can set exact coordinates manually.`;return}
+  finally{venueLookupActive=false;$('venue').disabled=false}
+ }
+ setSite(venue.lat,venue.lon,'venue',venue.name);
+ showVenueStatus(venue);showOriginSearch(venue);
+}
+function showVenueStatus(v){
+ const panel=$('venueStatus');panel.replaceChildren();
+ panel.append(document.createTextNode(`${v.name}: ${v.lat.toFixed(6)}, ${v.lon.toFixed(6)} — ${v.precision}. ${v.note} Distances are from this mapped point, not necessarily the course.`));
+ if(v.sourceUrl&&/^https:\/\//.test(v.sourceUrl)){
+  const a=document.createElement('a');a.href=v.sourceUrl;a.target='_blank';a.rel='noopener noreferrer';a.textContent=' Source / directions';
+  panel.append(document.createTextNode(' '),a);
+ }
+}
+// A venue coordinate is a facility reference, not a surveyed course location.
+// Retain understated rings at regional zoom, transition to checkered flags at
+// closer zoom, and increase flag visibility continuously with each zoom level.
+// Venue markers are drawn before tracks and NTRIP stations (always underneath).
+function venueMarkerRadius(){return state.zoom>=13?11:state.zoom>=10?8.5:state.zoom>=7?5.5:state.zoom>=5?3.8:2.7}
+function venueMarkerStyle(){
+ const z=state.zoom;
+ return {
+  ringOpacity:z<=6?.20+.04*Math.max(0,z-3):.30*clamp((10-z)/4,0,1),
+  // Full-opacity black/white checks at high zoom, easily visible on aerial imagery.
+  flagOpacity:z<7?0:clamp(.55+.095*(z-7),.55,1),
+  flagWidth:clamp(14+(z-7)*2,14,28)
+ };
+}
+function drawSelectedVenueGlow(x,y){
+ ctx.save();const gradient=ctx.createRadialGradient(x,y,5,x,y,27);
+ gradient.addColorStop(0,'rgba(255,244,168,.62)');gradient.addColorStop(.55,'rgba(255,235,135,.23)');gradient.addColorStop(1,'rgba(255,235,135,0)');
+ ctx.beginPath();ctx.arc(x,y,27,0,Math.PI*2);ctx.fillStyle=gradient;ctx.fill();ctx.restore();
+}
+function drawCheckeredFlag(x,y,size,opacity){
+ const h=size*.71,left=-size/2+1,top=-h/2;
+ const cols=4,rows=3,cw=size/cols,ch=h/rows;
+ ctx.save();ctx.translate(x,y);ctx.globalAlpha=opacity;
+ // Dark backing/white keyline improves visibility on bright satellite photos.
+ ctx.shadowColor='rgba(0,0,0,.94)';ctx.shadowBlur=3.8;ctx.shadowOffsetY=1;
+ ctx.fillStyle='rgba(16,26,34,.91)';ctx.fillRect(left-2,top-2,size+4,h+4);
+ ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+ // Short neutral staff, without a pointed base or map-pin crosshair.
+ ctx.lineCap='round';ctx.lineWidth=2.7;ctx.strokeStyle='rgba(13,22,29,.88)';
+ ctx.beginPath();ctx.moveTo(left-.9,top-2);ctx.lineTo(left-.9,top+h+2);ctx.stroke();
+ ctx.lineWidth=1.15;ctx.strokeStyle='#e6eaf0';ctx.stroke();
+ // Curved rows form a recognizable small racing flag at high zoom.
+ for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
+  const x0=left+col*cw,x1=x0+cw;
+  const wave0=Math.sin(col*Math.PI/3)*h*.105;
+  const wave1=Math.sin((col+1)*Math.PI/3)*h*.105;
+  const y0=top+row*ch,y1=y0+ch;
+  ctx.beginPath();ctx.moveTo(x0,y0+wave0);ctx.lineTo(x1,y0+wave1);
+  ctx.lineTo(x1,y1+wave1);ctx.lineTo(x0,y1+wave0);ctx.closePath();
+  ctx.fillStyle=(row+col)%2===0?'#f7f8fa':'#25313b';ctx.fill();
+ }
+ // Contrasting perimeter makes the flag legible over bright USGS imagery.
+ ctx.beginPath();
+ ctx.moveTo(left,top);
+ for(let col=1;col<=cols;col++)ctx.lineTo(left+col*cw,top+Math.sin(col*Math.PI/3)*h*.105);
+ for(let col=cols;col>=0;col--)ctx.lineTo(left+col*cw,top+h+Math.sin(col*Math.PI/3)*h*.105);
+ ctx.closePath();ctx.lineWidth=1.5;ctx.strokeStyle='#f7fafc';ctx.stroke();
+ ctx.restore();
+}
+function drawVenuesAndTracks(){
+ if($('showVenues').checked){
+  const seen=new Set(),r=venueMarkerRadius(),style=venueMarkerStyle();
+  for(const v of state.venues){
+   if(!Number.isFinite(v.lat)||!Number.isFinite(v.lon))continue;
+   const key=`${v.lat.toFixed(5)}|${v.lon.toFixed(5)}`;
+   if(seen.has(key))continue;seen.add(key);
+   const p=screen(v.lat,v.lon);if(p.x< -22||p.x>width+22||p.y< -22||p.y>height+22)continue;
+   if(style.ringOpacity>0){
+    ctx.save();ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(39,51,62,${(style.ringOpacity*.45).toFixed(3)})`;
+    ctx.lineWidth=3.5;ctx.stroke();
+    ctx.strokeStyle=`rgba(211,216,221,${style.ringOpacity.toFixed(3)})`;
+    ctx.lineWidth=state.zoom>=10?1.6:1.2;ctx.stroke();ctx.restore();
+   }
+   if(state.site?.kind==='venue'&&state.site.label===v.name)drawSelectedVenueGlow(p.x,p.y);
+   if(style.flagOpacity>0)drawCheckeredFlag(p.x,p.y,style.flagWidth,style.flagOpacity);
+   registerHit(locationHitGrid,p.x,p.y,v);
+  }
+ }
+ if($('showTracks').checked){
+  // Race tracks use the same checkered-flag language as autocross venues.
+  // At distant zoom, draw subdued circles to prevent overplotting thousands of sites.
+  const used=new Set(),style=venueMarkerStyle();
+  for(const v of state.trackFiltered){
+   const p=screen(v.lat,v.lon);if(p.x< -24||p.x>width+24||p.y< -24||p.y>height+24)continue;
+   if(state.zoom<=6){const cell=Math.floor(p.x/12)+','+Math.floor(p.y/12);if(used.has(cell))continue;used.add(cell)}
+   if(state.site?.kind==='track'&&state.site.label===v.name)drawSelectedVenueGlow(p.x,p.y);
+   if(style.flagOpacity>0)drawCheckeredFlag(p.x,p.y,style.flagWidth,style.flagOpacity);
+   else{
+    ctx.save();ctx.beginPath();ctx.arc(p.x,p.y,venueMarkerRadius(),0,2*Math.PI);
+    ctx.lineWidth=1.7;ctx.strokeStyle='rgba(227,230,235,.52)';ctx.stroke();ctx.restore();
+   }
+   registerHit(locationHitGrid,p.x,p.y,v);
+  }
+ }
+
+}
+function showOriginSearch(location){
+ const nearby=state.filtered.map(s=>({s,km:dist(location,s)})).sort((a,b)=>a.km-b.km);
+ const searchKm=radiusKm(),within=nearby.filter(entry=>entry.km<=searchKm).length;
+ const content=$('popupContent');content.replaceChildren();
+ const heading=document.createElement('strong');heading.textContent=location.name+' — NTRIP search origin';content.append(heading);
+ const info=document.createElement('div');info.style.marginTop='5px';
+ info.textContent=`${within} matching stations within ${lengthLabel(searchKm)} · ${nearby.length} available to compare`;
+ content.append(info);
+ for(const {s,km} of nearby.slice(0,3)){
+  const row=document.createElement('div');row.style.marginTop='3px';
+  row.textContent=`${lengthLabel(km)} · ${s.name} (${s.network})`;content.append(row);
+ }
+ if(!nearby.length){const row=document.createElement('div');row.textContent='No stations match the current network and access filters.';content.append(row)}
+ const button=document.createElement('button');button.type='button';button.className='secondary';button.style.marginTop='8px';
+ button.textContent='View nearest station list';button.onclick=()=>{
+  $('popup').hidden=true;$('results').scrollIntoView({behavior:'smooth',block:'start'});
+ };content.append(button);
+ // On narrow mobile maps the popup can cover a caster marker and block taps.
+ // Keep the station layer directly selectable; results are already in the sidebar.
+ if(window.matchMedia('(max-width:760px)').matches){
+  $('popup').hidden=true;
+  $('mapHint').textContent=location.name+' selected · nearest NTRIP stations below';
+ }else $('popup').hidden=false;
+}
+function useLocationMarker(closest){
+ setSite(closest.lat,closest.lon,'category' in closest?'venue':'track',closest.name);
+ if('category' in closest){$('venue').value=String(closest.id);showVenueStatus(closest)}
+ else {$('trackSelect').value=closest.key;showTrackStatus(closest)}
+ // Show the nearest correction stations, retaining the map for further selection.
+ showOriginSearch(closest);
+ return true;
+}
+function venueTap(x,y){
+ const location=nearestHit(locationHitGrid,x,y,16);
+ return location?useLocationMarker(location):false;
+}
+function visibleBounds(){
+ const nw=screenToGeo(0,0),se=screenToGeo(width,height);
+ return {south:clamp(se.lat,-85,85),north:clamp(nw.lat,-85,85),west:nw.lon,east:se.lon};
+}
+// Track categories are estimates based on source tags and names, not verified operations.
+function categorizeTrack(tags={},name=''){
+ const words=(name+' '+(tags.sport||'')+' '+(tags.description||'')).toLowerCase();
+ if(/\bkart|karting|kartodromo|go.kart/.test(words))return 'kart';
+ if(/motocross|\bmx\b|off.road|dirt bike|supercross|rallycross|rally school/.test(words))return 'offroad';
+ if(/drag|dragstrip|dragway/.test(words))return 'drag';
+ if(/oval|speedway|nascar|superspeedway|short track|bullring/.test(words))return 'oval';
+ if(/road course|circuit|raceway|motorsport|motorplex|autodrome|race park|race track|racing|track|grand prix|grandstand/.test(words))return 'road';
+ return 'other';
+}
+function trackLabel(t){return `${t.name} [${t.kind}]`}
+function addTrack(t){
+ if(!t||!t.name||!Number.isFinite(t.lat)||!Number.isFinite(t.lon)||Math.abs(t.lat)>90||Math.abs(t.lon)>180)return false;
+ t.kind=t.kind||categorizeTrack(t.tags||{},t.name);
+ t.precision=t.precision||'approximate mapped track coordinate';
+ if(state.tracks.some(x=>x.key===t.key))return false;
+ // Prevent multiple source records representing exactly the same facility. Retain distinct kart layouts.
+ const norm=n=>n.toLowerCase().replace(/\b(michelin|weathertech|international|park|road course|raceway|motorsports|motor sport|racing|speedway|motorpark|circuit|the)\b/g,'').replace(/[^a-z0-9]/g,'');
+ const close=state.tracks.find(x=>dist(x,t)<1.8&&(norm(x.name)===norm(t.name)||x.name.toLowerCase()===t.name.toLowerCase()));
+ if(close){
+  // Preserve the event-verified record when it arrives after archived or OSM data.
+  if(t.verifiedRoadCourse&&!close.verifiedRoadCourse)Object.assign(close,{...t,key:close.key});
+  return false;
+ }
+ state.tracks.push(t);return true;
+}
+function refreshTrackView(){
+ const f=$('trackFilter').value;
+ state.trackFiltered=state.tracks.filter(t=>f==='all'||(f==='verified'&&t.verifiedRoadCourse)||t.kind===f);
+ const select=$('trackSelect'),old=select.value;
+ select.replaceChildren(new Option('Choose a track…',''));
+ const sorted=[...state.trackFiltered].sort((a,b)=>a.name.localeCompare(b.name));
+ const fragment=document.createDocumentFragment();
+ const official=sorted.filter(t=>t.verifiedRoadCourse),other=sorted.filter(t=>!t.verifiedRoadCourse);
+ if(official.length){const group=document.createElement('optgroup');group.label=`2026 SCCA / NASA paved courses (${official.length})`;
+  for(const t of official)group.append(new Option(t.name+(t.region?' — '+t.region:''),t.key));fragment.append(group)}
+ if(other.length){const group=document.createElement('optgroup');group.label='Other motorsport tracks';
+  for(const t of other)group.append(new Option(t.name+(t.region?' — '+t.region:''),t.key));fragment.append(group)}
+ select.append(fragment);if(state.trackFiltered.some(t=>t.key===old))select.value=old;
+ scheduleDraw();
+}
+function showTrackStatus(t){
+ const desc=`${t.name}: ${t.lat.toFixed(6)}, ${t.lon.toFixed(6)}. ${t.precision}; source: ${t.source}${t.organizations?' ('+t.organizations+')':''}. ${t.note||'Facility operation and exact course location not verified.'}`;
+ const panel=$('trackStatus');panel.replaceChildren(document.createTextNode(desc));
+ if(t.sourceUrl&&/^https:\/\//.test(t.sourceUrl)){
+  const a=document.createElement('a');a.href=t.sourceUrl;a.target='_blank';a.rel='noopener noreferrer';a.textContent=' Source';panel.append(' ',a);
+ }
+}
+function trackProgress(message){$('trackStatus').textContent=message}
+function saveTracks(){
+ try{const osm=state.tracks.filter(t=>t.source==='OpenStreetMap (Overpass)');
+  localStorage.setItem(TRACK_STORAGE,JSON.stringify(osm));}catch(e){/* Private browsing or quota exhaustion. */}
+}
+// Paved road courses documented on 2026 SCCA/NASA event calendars.
+// Coordinates are archived course waypoints or separately sourced mapped facility points.
+// The source indicates an event association, not a guarantee every upcoming event will run.
+// Add new circuits to this array and to paved_road_courses.csv for review.
+const VERIFIED_ROAD_COURSES = [{"name":"Homestead-Miami Speedway","lat":25.453667,"lon":-80.409694,"region":"FL","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Road-course configuration inside oval."},{"name":"Sebring International Raceway","lat":27.450222,"lon":-81.35375,"region":"FL","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Michelin Raceway Road Atlanta","lat":34.150361,"lon":-83.814194,"region":"GA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Virginia International Raceway","lat":36.568583,"lon":-79.207806,"region":"VA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Carolina Motorsports Park","lat":34.486694,"lon":-80.595722,"region":"SC","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Roebling Road Raceway","lat":32.167056,"lon":-81.322861,"region":"GA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Barber Motorsports Park","lat":33.532611,"lon":-86.619694,"region":"AL","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"MotorSport Ranch Cresson","lat":32.523111,"lon":-97.615278,"region":"TX","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Eagles Canyon Raceway","lat":33.367611,"lon":-97.429667,"region":"TX","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Hallett Motor Racing Circuit","lat":36.220667,"lon":-96.590389,"region":"OK","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"MSR Houston","lat":29.279,"lon":-95.422417,"region":"TX","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Buttonwillow Raceway Park","lat":35.48875,"lon":-119.5445,"region":"CA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Historic timing point; classic and new Circuit layouts differ."},{"name":"Podium Club at Attesa","lat":32.81597,"lon":-111.83469,"region":"AZ","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://mapcarta.com/W1152780323","note":"OSM mapped feature center; not track start/finish."},{"name":"Thunderhill Raceway Park","lat":39.538472,"lon":-122.331194,"region":"CA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Historic timing point for one track configuration."},{"name":"Portland International Raceway","lat":45.595028,"lon":-122.694472,"region":"OR","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Pacific Raceways","lat":47.320917,"lon":-122.147528,"region":"WA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Road course, not the dragstrip. Both SCCA and NASA activity recorded in 2026."},{"name":"Summit Point Motorsports Park","lat":39.235194,"lon":-77.969056,"region":"WV","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Main circuit; Jefferson and Shenandoah circuits have separate layouts."},{"name":"New Jersey Motorsports Park — Thunderbolt","lat":39.360806,"lon":-75.073611,"region":"NJ","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Thunderbolt track within multi-course complex."},{"name":"New Jersey Motorsports Park — Lightning","lat":39.361472,"lon":-75.054111,"region":"NJ","organizations":"SCCA, NASA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Lightning track within multi-course complex."},{"name":"Nelson Ledges Road Course","lat":41.307083,"lon":-81.014111,"region":"OH","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Some 2026 scheduled Majors events were canceled; regional activity may continue."},{"name":"Watkins Glen International","lat":42.340972,"lon":-76.928833,"region":"NY","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Thompson Speedway Motorsports Park — Road Course","lat":41.979806,"lon":-71.827417,"region":"CT","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Separate road course within oval facility."},{"name":"Blackhawk Farms Raceway","lat":42.488444,"lon":-89.117528,"region":"IL","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Mid-Ohio Sports Car Course","lat":40.689444,"lon":-82.635278,"region":"OH","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Road America","lat":43.797889,"lon":-87.989639,"region":"WI","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Brainerd International Raceway","lat":46.416861,"lon":-94.274806,"region":"MN","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Facility includes road-course and drag-racing configurations."},{"name":"GingerMan Raceway","lat":42.408,"lon":-86.140472,"region":"MI","organizations":"SCCA, NASA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Grattan Raceway","lat":43.095917,"lon":-85.38525,"region":"MI","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Palmer Motorsports Park","lat":42.2255,"lon":-72.256222,"region":"MA","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://www.palmermotorsportspark.com/Contacts.aspx?ID=Directions","note":"Official venue GPS coordinates are for navigation; track coordinate is not surveyed."},{"name":"Dominion Raceway — Road Course","lat":38.13808,"lon":-77.50376,"region":"VA","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://mapcarta.com/N5339058925","note":"Mapped facility, road-course footprint not surveyed."},{"name":"High Plains Raceway","lat":39.735028,"lon":-103.894444,"region":"CO","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Harris Hill Raceway","lat":29.918528,"lon":-97.873611,"region":"TX","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Atlanta Motorsports Park","lat":34.433167,"lon":-84.176222,"region":"GA","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"The Ridge Motorsports Park","lat":47.254694,"lon":-123.192472,"region":"WA","organizations":"SCCA, NASA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center. Both SCCA and NASA activity recorded in 2026."},{"name":"Pocono Raceway — Road Course","lat":41.052639,"lon":-75.511722,"region":"PA","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Source waypoint is full road course; oval also present."},{"name":"NOLA Motorsports Park","lat":29.885389,"lon":-90.199167,"region":"LA","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Nashville Superspeedway — Road Course","lat":36.046222,"lon":-86.409667,"region":"TN","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Road-course configuration inside oval."},{"name":"Daytona International Speedway — Road Course","lat":29.187667,"lon":-81.072778,"region":"FL","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Road-course configuration inside oval."},{"name":"Lime Rock Park","lat":41.928583,"lon":-73.381,"region":"CT","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Las Vegas Motor Speedway — Road Course","lat":36.2745,"lon":-115.012583,"region":"NV","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Complex has multiple courses; historic position from oval waypoint."},{"name":"Autobahn Country Club","lat":41.456556,"lon":-88.125889,"region":"IL","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Multiple course configurations."},{"name":"WeatherTech Raceway Laguna Seca","lat":36.586472,"lon":-121.756639,"region":"CA","organizations":"SCCA","eventSourceUrl":"https://my.scca.com/eweb/DynamicPage.aspx?WebCode=results","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"NCM Motorsports Park","lat":37.001583,"lon":-86.368833,"region":"KY","organizations":"NASA","eventSourceUrl":"https://nasagreatlakes.com/schedule/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Chuckwalla Valley Raceway","lat":33.753667,"lon":-115.319611,"region":"CA","organizations":"NASA","eventSourceUrl":"https://nasasocal.com/find-an-event/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Willow Springs International Raceway","lat":34.8715,"lon":-118.263722,"region":"CA","organizations":"NASA","eventSourceUrl":"https://nasasocal.com/find-an-event/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Big Willow; other layouts are elsewhere within complex."},{"name":"Sonoma Raceway","lat":38.161472,"lon":-122.454722,"region":"CA","organizations":"SCCA, NASA","eventSourceUrl":"https://nasanorcal.com/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center."},{"name":"Pueblo Motorsports Park","lat":38.299889,"lon":-104.677417,"region":"CO","organizations":"SCCA, NASA","eventSourceUrl":"https://events.nasarockymountain.com/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"2026 SCCA and/or NASA race, track day, or HPDE calendar venue; waypoint is not a surveyed course center. Both SCCA and NASA activity recorded in 2026."},{"name":"North Carolina Center for Automotive Research (NCCAR)","lat":36.479389,"lon":-77.579833,"region":"NC","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-events%2Ctrackdays%2Ctrackdays-2%2Ctrack-events%2Cregional-track-event%2Ctrack-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Different from previously sourced event entrance point."},{"name":"La Junta Raceway","lat":38.043806,"lon":-103.519361,"region":"CO","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events?categories=track-night-events%2Ctrackdays%2Ctrackdays-2%2Ctrack-events%2Cregional-track-event%2Ctrack-night-in-america","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Historic timing point; published regional event on 2026 schedule."},{"name":"Firebird Raceway — East Road Course","lat":33.273778,"lon":-111.963333,"region":"AZ","organizations":"NASA","eventSourceUrl":"https://nasaaz.com/schedule/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"East course at Firebird/Wild Horse Pass complex."},{"name":"Firebird Raceway — West Road Course","lat":33.266222,"lon":-111.971778,"region":"AZ","organizations":"NASA","eventSourceUrl":"https://nasaaz.com/schedule/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"West course at Firebird/Wild Horse Pass complex."},{"name":"Radford Racing School / Firebird","lat":33.264222,"lon":-111.967639,"region":"AZ","organizations":"NASA","eventSourceUrl":"https://nasaaz.com/schedule/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"RaceCapture Bondurant waypoint; facility uses multiple road-course loops."},{"name":"INDE Motorsports Ranch","lat":32.225444,"lon":-110.005722,"region":"AZ","organizations":"NASA","eventSourceUrl":"https://nasaaz.com/schedule/","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"South-course historic waypoint."},{"name":"Ozarks International Raceway","lat":38.272215,"lon":-92.886444,"region":"MO","organizations":"SCCA, NASA","eventSourceUrl":"https://ozarksinternationalraceway.com/events-calendar/category/scca/","coordinateSourceUrl":"https://app.myracingcareer.com/en/track/ozk/","note":"Published circuit reference position; SCCA Majors and NASA MidAmerica in July 2026."},{"name":"Oregon Raceway Park","lat":45.363802,"lon":-120.744547,"region":"OR","organizations":"NASA","eventSourceUrl":"https://members.drivenasa.com/events/5319","coordinateSourceUrl":"https://app.myracingcareer.com/en/track/ore/","note":"Published circuit reference point; NASA Northwest HPDE and races in June 2026."},{"name":"Waterford Hills Road Racing","lat":42.70897,"lon":-83.39093,"region":"MI","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events/2008943-detroit-jerry-shiloff-memorial-regional-road-race-waterford-hills-road-racing-inc","coordinateSourceUrl":"https://mapcarta.com/W641967487","note":"OSM facility center; SCCA regional race May 2026, not a surveyed racing line."},{"name":"Putnam Park Road Course","lat":39.58418,"lon":-86.74462,"region":"IN","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events/archives?categories=trek&page=10","coordinateSourceUrl":"https://mapcarta.com/W669531024","note":"OSM course feature center; SCCA Indianapolis Time Trials in August 2026."},{"name":"World Wide Technology Raceway — Infield Road Course","lat":38.650806,"lon":-90.135389,"region":"IL","organizations":"SCCA","eventSourceUrl":"https://www.sccastartingline.com/pages/2026-majors-schedule","coordinateSourceUrl":"https://www.wikidata.org/wiki/Q1362127","note":"Published facility reference; exact road-course position is unverified. SCCA 2026 Majors."},{"name":"Charlotte Motor Speedway — Roval","lat":35.35225,"lon":-80.685583,"region":"NC","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events/2009343-track-night-2026-charlotte-motor-speedway-july-9","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Historic track waypoint; 2026 SCCA Track Night explicitly uses 2.25-mile Roval."},{"name":"Utah Motorsports Campus / Burt Brothers Motorpark","lat":40.575,"lon":-112.37472,"region":"UT","organizations":"NASA","eventSourceUrl":"https://members.drivenasa.com/events/5404","coordinateSourceUrl":"https://en.wikipedia.org/wiki/Utah_Motorsports_Campus","note":"Facility center for several course configurations; NASA Utah HPDE/races in 2026."},{"name":"New Hampshire Motor Speedway — Road Course","lat":43.363083,"lon":-71.462,"region":"NH","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events/2010437-new-england-summer-tme-trial-new-hampshire-motor-speedway","coordinateSourceUrl":"https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv","note":"Historic speedway timing waypoint; road-course location/layout unverified. SCCA July 2026 Time Trial."},{"name":"Milwaukee Mile — Road Course","lat":43.02083,"lon":-88.01139,"region":"WI","organizations":"SCCA","eventSourceUrl":"https://www.scca.com/events/2008850-milwaukee-grand-prix-test-day-double-regional-road-race-milwaukee-mile","coordinateSourceUrl":"https://mapcarta.com/26897230","note":"Facility center near paved oval/infield; exact SCCA road-course configuration unverified."},{"name":"Motorsport Park Hastings","lat":40.57861,"lon":-98.35306,"region":"NE","organizations":"NASA","eventSourceUrl":"https://members.drivenasa.com/events/5343","coordinateSourceUrl":"https://www.racingcircuits.info/north-america/usa/motorsports-park-hastings.html","note":"Approximate road-course center; NASA Nebraska Grand Prix HPDE and racing in September 2026."}];
+function loadVerifiedRoadCourses(){
+ for(const v of VERIFIED_ROAD_COURSES){
+  addTrack({key:'scca-nasa-'+v.name.toLowerCase().replace(/[^a-z0-9]+/g,'-'),
+   name:v.name,lat:v.lat,lon:v.lon,region:v.region,kind:'road',
+   verifiedRoadCourse:true,organizations:v.organizations,
+   source:'2026 SCCA/NASA published event calendars',sourceUrl:v.eventSourceUrl,
+   coordinateSourceUrl:v.coordinateSourceUrl,
+   precision:v.coordinateSourceUrl.includes('RaceCapture')?'historic course timing waypoint (not surveyed)':'sourced facility/entrance coordinate (not surveyed)',
+   note:v.note});
+ }
+}
+// Offline fallback: archived RaceCapture start/finish waypoints, not surveyed facility centers.
+// Entries may be historic; automatically retrieved catalogs and OSM add coverage when online.
+const CORE_TRACKS=[
+ ['Atlanta Motor Speedway',33.385722,-84.316889],
+ ['Atlanta Motorsports Park',34.433167,-84.176222],
+ ['Barber Motorsports Park',33.532611,-86.619694],
+ ['Autobahn Country Club',41.456556,-88.125889],
+ ['Blackhawk Farms Raceway',42.488444,-89.117528],
+ ['Brainerd International Raceway',46.416861,-94.274806],
+ ['Buttonwillow Raceway',35.488750,-119.544500],
+ ['Carolina Motorsports Park',34.486694,-80.595722],
+ ['Charlotte Motor Speedway',35.352250,-80.685583],
+ ['Chuckwalla Valley Raceway',33.753667,-115.319611],
+ ['Circuit of the Americas',30.131889,-97.639861],
+ ['Daytona International Speedway',29.187667,-81.072778],
+ ['Eagles Canyon Raceway',33.367611,-97.429667],
+ ['GingerMan Raceway',42.408000,-86.140472],
+ ['Grattan Raceway',43.095917,-85.385250],
+ ['Hallett Motor Racing Circuit',36.220667,-96.590389],
+ ['Harris Hill Raceway',29.918528,-97.873611],
+ ['High Plains Raceway',39.735028,-103.894444],
+ ['Homestead-Miami Speedway',25.453667,-80.409694],
+ ['Indianapolis Motor Speedway',39.793139,-86.238861],
+ ['Kansas Speedway',39.116583,-94.833833],
+ ['Laguna Seca',36.586472,-121.756639],
+ ['Lime Rock Park',41.928583,-73.381000],
+ ['Las Vegas Motor Speedway',36.274500,-115.012583],
+ ['Martinsville Speedway',36.634222,-79.852278],
+ ['La Junta Raceway',38.043806,-103.519361],
+ ['Arizona Motorsports Park',33.513722,-112.390472],
+ ['Arroyo Seco Raceway',32.236833,-107.429667],
+ ['Charlotte County Speedway',26.908778,-82.000389],
+ ['GrandSport Speedway',29.324722,-95.046278],
+ ['Gateway International Raceway',38.650444,-90.136917]
+];
+function loadCoreTracks(){
+ for(const [name,lat,lon] of CORE_TRACKS) addTrack({key:'core-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-'),name,lat,lon,
+  source:'RaceCapture (archived)',sourceUrl:'https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv',
+  precision:'archived start/finish waypoint (approximate)',kind:categorizeTrack({},name),
+  note:'Historic list; this point is not a surveyed facility center, and the track may be inactive.'});
+}
+function loadSavedTracks(){
+ loadVerifiedRoadCourses();
+ loadCoreTracks();
+ try{const done=JSON.parse(localStorage.getItem(TRACK_SCAN_PROGRESS)||'[]');if(Array.isArray(done))for(const i of done)if(Number.isInteger(i)&&i>=0&&i<USA_REGIONS.length)scannedRegions.add(i)}catch(e){}
+ try{const saved=JSON.parse(localStorage.getItem(TRACK_STORAGE)||'[]');
+  if(Array.isArray(saved))for(const t of saved.slice(0,12000))if(t&&t.source==='OpenStreetMap (Overpass)')addTrack(t)
+ }catch(e){}refreshTrackView();
+}
+function isNearUS(lat,lon){
+ // Geographic prefilter only, not authoritative national borders. Canadian and Mexican border
+ // tracks can appear; their country must be independently confirmed before US-only use.
+ return (lat>=24&&lat<=50&&lon>=-126&&lon<=-66)||(lat>=51&&lat<=72&&lon>=-180&&lon<=-129)||(lat>=18&&lat<=23&&lon>=-161&&lon<=-154);
+}
+async function loadOpenTrackCatalogs(){
+ let status=[],count=0;
+ try{
+  const r=await fetch(RACECAPTURE_URL,{headers:{Accept:'text/plain'}});if(!r.ok)throw Error('HTTP '+r.status);
+  const rows=(await r.text()).split(/\r?\n/);let added=0;
+  for(const row of rows){
+   const match=row.match(/^\s*[A-Za-z]\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(.+?)\s*$/);
+   if(!match)continue;const lat=+match[1],lon=+match[2],name=match[3].trim();
+   if(!isNearUS(lat,lon))continue;
+   if(addTrack({key:'rc-'+name.toLowerCase().replace(/\W+/g,'-')+'-'+lat.toFixed(5),name,lat,lon,region:'US geographic extent (country unverified)',kind:categorizeTrack({},name),source:'RaceCapture (archived)',sourceUrl:'https://github.com/autosportlabs/RaceCapture-Pro_firmware/blob/master/data/start_finish_points/sf_data.csv',precision:'historic start/finish waypoint (not a facility center)',note:'Legacy timing point; track may be closed. Some entries may be Canadian or Mexican near the border.'}))added++;
+  }status.push('RaceCapture '+added);count+=added;
+ }catch(e){status.push('RaceCapture unavailable ('+e.message+')')}
+ try{
+  const r=await fetch(RACEAPI_URL,{headers:{Accept:'application/json'}});if(!r.ok)throw Error('HTTP '+r.status);
+  const arr=await r.json();if(!Array.isArray(arr))throw Error('unexpected format');let added=0;
+  for(const rec of arr){if(rec.country!=='US'||rec.isFictional||rec.latitude===null||rec.longitude===null)continue;
+   const lat=Number(rec.latitude),lon=Number(rec.longitude);
+   if(addTrack({key:'rta-'+rec.id,name:String(rec.name||''),lat,lon,region:'United States',kind:categorizeTrack({},String(rec.name||'')),source:'RaceTracksAPI',sourceUrl:'https://github.com/LigasAVBrasil/RaceTracksAPI',precision:'source-supplied circuit location',note:'Circuit status and precise start line unverified.'}))added++;
+  }status.push('Circuit API '+added);count+=added;
+ }catch(e){status.push('Circuit API unavailable ('+e.message+')')}
+ trackImportStatus=status.join(' · ');refreshTrackView();
+ trackProgress(`${state.tracks.length} track locations loaded (${state.tracks.filter(t=>t.verifiedRoadCourse).length} SCCA/NASA 2026 paved courses; ${trackImportStatus}). OSM discovery adds further facilities. Sources include historic/inactive facilities; completeness not guaranteed.`);
+}
+async function queryOverpass(bounds){
+ const box=bounds.map(n=>Number(n).toFixed(5)).join(',');
+ // US scan clips to national boundary; viewport requests cover the selected area regardless of country.
+ const byCountry=!!queryOverpass.usOnly;
+ const area=byCountry?'area["ISO3166-1"="US"]["admin_level"="2"]->.us;':'';
+ const filter=byCountry?'(area.us)':'';
+ // Return facilities as well as named track ways; no imposed result truncation.
+ const q=`[out:json][timeout:45];${area}(nwr["leisure"="sports_centre"]["sport"~"motor|karting|motocross|speedway"](${box})${filter};nwr["highway"="raceway"]["name"](${box})${filter};nwr["landuse"="raceway"]["name"](${box})${filter};nwr["leisure"="racetrack"]["name"](${box})${filter};nwr["sport"~"^(motor|karting|motocross|speedway)$"]["name"](${box})${filter};);out center;`;
+ let err;
+ for(const endpoint of OVERPASS_URLS){
+  try{
+   const ctrl=new AbortController(),timeout=setTimeout(()=>ctrl.abort(),57000);
+   try{const resp=await fetch(endpoint,{method:'POST',body:'data='+encodeURIComponent(q),headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},signal:ctrl.signal});if(!resp.ok)throw Error('HTTP '+resp.status);const data=await resp.json();if(!Array.isArray(data.elements))throw Error('Invalid Overpass response');return data.elements}
+   finally{clearTimeout(timeout)}
+  }catch(e){err=e}
+ }throw err||Error('No available Overpass server');
+}
+function mergeOverpass(elements){
+ let added=0;
+ for(const e of elements){
+  const name=String(e.tags?.name||'').trim();if(!name)continue;
+  const lat=Number(e.center?.lat??e.lat),lon=Number(e.center?.lon??e.lon);
+  const key=`osm-${e.type}-${e.id}`;
+  if(addTrack({key,name,lat,lon,kind:categorizeTrack(e.tags||{},name),region:e.tags?.['addr:state']||e.tags?.['addr:city']||'',source:'OpenStreetMap (Overpass)',sourceUrl:`https://www.openstreetmap.org/${e.type}/${e.id}`,precision:'OSM mapped feature centroid (or way center)',note:'Does not confirm actual course location, public access or current operation.'}))added++;
+ }
+ refreshTrackView();saveTracks();return added;
+}
+function visibleBounds(){
+ const nw=screenToGeo(0,0),se=screenToGeo(width,height);
+ return {south:clamp(se.lat,-85,85),north:clamp(nw.lat,-85,85),west:nw.lon,east:se.lon};
+}
+function queryUi(isLoading){trackLookupActive=isLoading;$('loadTracks').disabled=isLoading;$('stopTracks').disabled=!isLoading}
+async function loadTracksInView(){
+ if(trackLookupActive)return;
+ const b=visibleBounds(),dlon=b.east-b.west,dlat=b.north-b.south;
+ if(dlon<=0||dlon>5.5||dlat>5.5||dlat<=0){trackProgress('Zoom closer to query a region no larger than 5.5° × 5.5°. For nationwide discovery, choose the US survey option.');return}
+ queryUi(true);trackCancel=false;trackProgress('Querying motorsport facilities in the current map view…');
+ try{queryOverpass.usOnly=false;const results=await queryOverpass([b.south,b.west,b.north,b.east]);const added=mergeOverpass(results);trackProgress(`${added} new locations from this map view; ${state.tracks.length} track records loaded.`)}
+ catch(e){trackProgress(`Track lookup failed: ${e.message}; existing data is retained.`)}
+ finally{queryUi(false)}
+}
+async function loadNationwideTracks(){
+ if(trackLookupActive)return;
+ if(scannedRegions.size>=USA_REGIONS.length){trackProgress('All U.S. regions already surveyed in this browser. Previously retrieved track data are saved locally. This is OSM coverage, not an exhaustive or current-activity guarantee.');return}
+ queryUi(true);trackCancel=false;let added=0,success=0,failures=[];
+ for(let i=0;i<USA_REGIONS.length;i++){
+  if(trackCancel)break;
+  if(scannedRegions.has(i))continue;
+  trackProgress(`U.S. OSM survey region ${i+1}/${USA_REGIONS.length}; ${added} new tracks; ${failures.length} failed. Uses public Overpass and may take minutes.`);
+  try{queryOverpass.usOnly=true;const results=await queryOverpass(USA_REGIONS[i]);added+=mergeOverpass(results);success++;scannedRegions.add(i);try{localStorage.setItem(TRACK_SCAN_PROGRESS,JSON.stringify([...scannedRegions]))}catch(e){} }
+  catch(e){failures.push((i+1)+': '+e.message)}
+  if(i+1<USA_REGIONS.length&&!trackCancel)await new Promise(r=>setTimeout(r,2500));
+ }
+ queryOverpass.usOnly=false;queryUi(false);
+ trackProgress(`${trackCancel?'Stopped':'Survey finished'}: ${scannedRegions.size}/${USA_REGIONS.length} U.S. regions completed, ${added} new OSM track records, ${failures.length} failed. ${state.tracks.length} total loaded. ${failures.length?'Failed regions: '+failures.slice(0,8).join('; '):''} This is mapped OSM coverage, not a verified exhaustive list.`);
+}
+function exportLocationCSV(filename,items,type){
+ const fields=['type','name','region','category_or_kind','lat','lon','coordinate_quality','source','location_note','source_url','organizations','coordinate_source_url'];
+ const csv=[fields.join(','),...items.map(v=>[type,v.name,v.region||'',v.category||v.kind||'',v.lat??'',v.lon??'',v.precision||'',v.source||'',v.note||'',v.sourceUrl||'',v.organizations||'',v.coordinateSourceUrl||''].map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(','))].join('\r\n');
+ const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=filename;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
+initVenues();refreshRadiusLabel();new ResizeObserver(resize).observe(mapEl);resize();refresh();
+renderProviderDirectory();
+updateProviderSelection();
+</script>
+</body>
+</html>
