@@ -51,8 +51,8 @@ The RCX RTK Datalogger was developed to combine high-rate RTK positioning with v
 ## System Architecture
 | File | Purpose |
 |---|---|
-| [`RCX_RTK_Datalogger-schematic_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/schematics/RCX_RTK_Datalogger-schematic_viewer.html) | Engineering model viewer for the hardware and wiring configuration. |
-| [`RCX_RTK_Datalogger - Firmware Schematic Viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/schematics/RCX_RTK_Datalogger%20-%20Firmware%20Schematic%20Viewer.html) | Engineering model viewer for the firmware architecture. |
+| [`RCX_RTK_Datalogger-schematic_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RCX_RTK_Datalogger-schematic_viewer.html) | Engineering model viewer for the hardware and wiring configuration. |
+| [`RCX_RTK_Datalogger-firmware_architecture_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RCX_RTK_Datalogger-firmware_architecture_viewer.html) | Engineering model viewer for the firmware architecture. |
 ```text
                          ┌──────────────────────┐
                          │     RCX RTK Base     │
