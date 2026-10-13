@@ -119,6 +119,8 @@ The base has been developed to:
 
 Development testing has used both **Centipede** and **RTK2go** NTRIP services. A single correctly configured base can provide correction data to multiple compatible rovers within the practical RTK baseline and communications limits.
 
+[`RTK_Atlas.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RTK_Atlas.html) is an interactive map for viewing all known free public NTRIPS Casters. While RTK services will work at distances up to 30km, obtaining an RTK Fixed position becomes increasingly difficult and unreliable. You may need to run your own base station if there are none within about 12km. Now that this technology has become so affordable, it's our hope that more venues will begin to operate their own public NTRIPS casters.
+
 ## Measured Performance
 
 The RCX RTK Datalogger has produced centimeter-class dynamic GNSS solution quality in motorsports testing, with substantially tighter stationary solution scatter under favorable conditions.
