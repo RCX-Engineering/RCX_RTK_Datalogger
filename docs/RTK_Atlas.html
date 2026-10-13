@@ -26,8 +26,8 @@
 .popup-distance{font-size:16px;font-weight:800;color:#0c364d;margin-bottom:4px}
 .popup-accuracy{font-size:12px;line-height:1.55;font-weight:600;margin-bottom:5px}
 .popup-station{border-top:1px solid #c5d6e4;padding-top:7px;margin-top:7px}
-.estimate-warning{color:#ffdb9d;font-weight:750;font-size:11px;line-height:1.4;margin-top:6px}
-.popup .estimate-warning{color:#8a3900;font-size:11px}
+.estimate-warning{color:#ff626a;font-weight:800;font-size:12px;line-height:1.45;margin-top:6px}
+.popup .estimate-warning{color:#ae1224;font-size:12px}
 /* Compact, expandable sidebar with high-priority site and station data first. */
 .intro{margin:0 0 12px;color:#e8f4fb;font-size:12px;line-height:1.42;max-width:55ch}
 .sidebar-section{border:1px solid #375371;border-radius:8px;background:#172c42;margin:9px 0;overflow:visible}
@@ -43,6 +43,7 @@
 /* Radius is a screening cutoff, not a prediction of an individual caster baseline. */
 .radius-quality{margin:6px 0 8px;padding:7px 9px;border-left:3px solid #6ea5b7;border-radius:3px;background:#20384d;color:#d7e6f2;font-size:11px;line-height:1.4}
 .radius-quality.caution{border-left-color:#e7b366;background:#423529;color:#fff0d8}
+.radius-quality.danger{border-left-color:#fb555f;background:#491e2b;color:#ffb8bf;font-weight:700}
 .action-row button{padding:5px 7px;min-height:32px;line-height:1.2;font-size:12px}
 @media(max-width:760px){.action-row button{min-height:36px}}
 .distance-hero{background:#233f57;border:1px solid #5c879e;padding:10px;border-radius:7px;margin:6px 0 10px}
@@ -74,7 +75,7 @@
 <details class="sidebar-section" id="filtersSection">
 <summary>Map &amp; filters</summary>
 <div class="section-body">
-<label for="basemap">Basemap</label><select id="basemap"><option value="hybrid">Hybrid: USGS (US) / Esri (elsewhere)</option><option value="usgs">Aerial: USGS (US) / Esri (elsewhere)</option><option value="esri">Esri satellite imagery (worldwide)</option><option value="topo">Topographic: USGS (US) / Esri (elsewhere)</option></select>
+<label for="basemap">Basemap</label><select id="basemap"><option value="hybrid">Hybrid: USGS preferred worldwide / Esri at higher zoom</option><option value="usgs-only">USGS only (hybrid imagery, no Esri fallback)</option><option value="usgs">Aerial: USGS preferred / Esri at higher zoom</option><option value="esri">Esri satellite imagery (worldwide)</option><option value="topo">Topographic: USGS preferred / Esri at higher zoom</option></select>
 <label for="network">Network / caster</label><select id="network"><option value="all">All free &amp; free-tier networks</option></select>
 <div class="provider-selection" id="providerSelection">Select a network for operator details and registration links.</div>
 <div class="card" id="mobileCard" hidden><label for="mobileCaster">Autocross mobile mountpoint</label><select id="mobileCaster"></select><div id="mobileInfo" class="mobile-note"></div><div class="copy-row"><select id="mobileCopyField" aria-label="NTRIP setting to copy"><option value="all">Full rover configuration</option><option value="host">Host</option><option value="port">Port</option><option value="mountpoint">Mountpoint</option></select><button type="button" id="mobileCopy">Copy</button></div></div>
@@ -213,16 +214,18 @@ const MAPS={
 };
 const COLORS={rtk2go:'#ffb24e',centipede:'#23dfaf',earthscope:'#c7a5ff',mobile:'#ff6dcb',other:'#68bff7'};
 const MAX_LAT=85.05112878;
-const MAX_USGS_ZOOM=16; // Published 1:9,028 maximum scale for USGS cached imagery.
-// The 1 cm + 1 ppm assumption matches u-blox F9P up to 20 km of baseline;
-// some professional receivers rate similar models up to 30 km.
-const NOMINAL_BASELINE_KM=20;
-const LONG_BASELINE_KM=30;
-const MIXED_IMAGERY_CREDIT='US imagery © USGS / USDA, The National Map · Worldwide imagery © Esri and contributors';
-// Conservative geographic masks determine imagery only, not political borders.
-// Ambiguous border tiles intentionally use Esri; USGS tiles remain on U.S. interiors.
-// Longitude/latitude pairs follow a simplified interior footprint; this avoids
-// hard-switching the entire map when panning across an international boundary.
+const MAX_USGS_ZOOM=16; // Last USGS cached zoom at the service's published maximum display scale.
+const MAX_USGS_GLOBAL_ZOOM=11; // Landsat/Blue Marble through about 1:289,000; high-detail imagery is U.S.-focused.
+// Distance-screening thresholds for the Quectel LG290P application.
+// These are project reliability rules, not published receiver specifications.
+const RTK_CAUTION_KM=20;
+const RTK_HIGH_RISK_KM=30;
+const RTK_CUTOFF_KM=50;
+
+// Choose one imagery source for the whole viewport, never individual providers
+// per tile. USGS publishes globally useful Blue Marble/Landsat imagery through
+// approximately zoom 11; higher-resolution orthophotos are U.S.-focused.
+// Approximate U.S. footprints are hints, not authoritative coverage boundaries.
 const US_INTERIOR_POLYGONS=[
  // Contiguous USA: simplified footprint, deliberately inset at borders.
  [[-123.5,48.0],[-123.5,43.0],[-122.6,40.0],[-119.3,36.0],[-117.0,33.1],
@@ -252,22 +255,43 @@ function pointInPolygon(lon,lat,polygon){
 function withinUSImagery(lon,lat){
  return US_INTERIOR_POLYGONS.some(p=>pointInPolygon(lon,lat,p));
 }
-function tileMapProvider(z,x,y){
- if(state.basemap==='esri'||z>MAX_USGS_ZOOM)return 'esri';
- // Georeference the tile center and four corners. Switch to Esri on tiles
- // straddling a border, preventing spurious USGS requests for other countries.
- const xs=[x+0.02,x+0.98,x+0.5],ys=[y+0.02,y+0.98,y+0.5];
- const samples=[[xs[0],ys[0]],[xs[1],ys[0]],[xs[0],ys[1]],[xs[1],ys[1]],[xs[2],ys[2]]];
- const world=256*2**z;
- return samples.every(([tx,ty])=>{
-  const lon=((tx*256)/world)*360-180;
-  const lat=Math.atan(Math.sinh(Math.PI*(1-2*(ty*256)/world)))*180/Math.PI;
-  return withinUSImagery(lon,lat);
- })?state.basemap:'esri';
+function nearUSImagery(lon,lat,marginKm=45){
+ if(withinUSImagery(lon,lat))return true;
+ // Conservative polygons omit some U.S. coastal areas. A small margin avoids
+ // forcing Esri around actual U.S. sites without expanding far into Canada.
+ const kmPerDegree=111.195,longitudeScale=Math.cos(lat*Math.PI/180)*kmPerDegree;
+ for(const polygon of US_INTERIOR_POLYGONS){
+  for(let i=0,j=polygon.length-1;i<polygon.length;j=i++){
+   const [aLon,aLat]=polygon[j],[bLon,bLat]=polygon[i];
+   const ax=(aLon-lon)*longitudeScale,ay=(aLat-lat)*kmPerDegree;
+   const bx=(bLon-lon)*longitudeScale,by=(bLat-lat)*kmPerDegree;
+   const vx=bx-ax,vy=by-ay,len2=vx*vx+vy*vy;
+   const t=len2?Math.max(0,Math.min(1,-(ax*vx+ay*vy)/len2)):0;
+   if(Math.hypot(ax+t*vx,ay+t*vy)<=marginKm)return true;
+  }
+ }
+ return false;
+}
+function viewMapProvider(){
+ // Explicit source choices override all automatic rules.
+ if(state.basemap==='usgs-only')return 'hybrid';
+ if(state.basemap==='esri')return 'esri';
+ // The USGS cache includes global imagery beyond national boundaries at the
+ // broad and intermediate zoom levels. Do not switch to Esri merely because
+ // the map center is outside the U.S. or near a coastline.
+ if(state.zoom<MAX_USGS_GLOBAL_ZOOM+1)return state.basemap;
+ // Higher-detail USGS orthoimagery is predominantly U.S. coverage. Keep its
+ // full native detail where available, then use Esri at zoom 17 and above.
+ if(state.zoom<MAX_USGS_ZOOM+1&&nearUSImagery(state.lon,state.lat))return state.basemap;
+ return 'esri';
 }
 const state={lat:39,lon:-96,zoom:3,basemap:'hybrid',stations:[],filtered:[],site:null,mode:'catalog',sourceTime:'',sourceMeta:{},selected:null,probes:new Map(),venues:[],tracks:[],trackFiltered:[]};
 const mapEl=$('map'),tileEl=$('tiles'),canvas=$('overlay'),ctx=canvas.getContext('2d',{alpha:true});
 let width=0,height=0,dpr=1,tiles=new Map(),drawPending=false,siteUI=null,dataSerial=0,tileLoaded=0,tileFailures=0;
+let oldTiles=new Map(),activeTileLevel=null,oldTileLevel=null,tileStageReady=false;
+let activeImageryProvider=null;
+const failedUSGSTiles=new Map();
+const USGS_FAILURE_RETRY_MS=120000; // Avoid a permanent fallback after a transient tile failure.
 const pointerMap=new Map();
 let gestureCancelled=false;
 const HIT_CELL=32;
@@ -310,15 +334,49 @@ function unproject(x,y){const s=wSize();return {lat:(180/Math.PI)*Math.atan(Math
 function center(){return project(state.lat,state.lon)}
 function screen(lat,lon){const p=project(lat,lon),o=center(),s=wSize();let dx=p.x-o.x;if(dx>s/2)dx-=s;if(dx< -s/2)dx+=s;return {x:width/2+dx,y:height/2+p.y-o.y}}
 function screenToGeo(x,y){const c=center();return unproject(c.x+x-width/2,c.y+y-height/2)}
-let viewAnimation=0;
-function cancelViewAnimation(){if(viewAnimation){cancelAnimationFrame(viewAnimation);viewAnimation=0}}
+let viewAnimation=0,zoomGoal=null;
+function cancelViewAnimation(){
+ if(viewAnimation){cancelAnimationFrame(viewAnimation);viewAnimation=0}
+ zoomGoal=null;
+}
 function setCenter(lat,lon){cancelViewAnimation();state.lat=clamp(lat,-MAX_LAT,MAX_LAT);state.lon=normLon(lon);syncDistanceUnits();scheduleDraw()}
 function offsetCenter(dx,dy){const c=center(),p=unproject(c.x-dx,c.y-dy);setCenter(p.lat,p.lon)}
+function setAnchoredZoom(value,anchorLat,anchorLon,anchorX,anchorY){
+ state.zoom=clamp(value,2,19);
+ const p=project(anchorLat,anchorLon);
+ const origin=unproject(p.x-(anchorX-width/2),p.y-(anchorY-height/2));
+ state.lat=origin.lat;state.lon=origin.lon;
+ syncDistanceUnits();scheduleDraw();
+}
 function zoom(delta,anchorX=width/2,anchorY=height/2){
- cancelViewAnimation();const newZoom=clamp(Math.round(state.zoom)+delta,2,19);if(newZoom===state.zoom)return;
- const before=screenToGeo(anchorX,anchorY);state.zoom=newZoom;
- const p=project(before.lat,before.lon),target=unproject(p.x-(anchorX-width/2),p.y-(anchorY-height/2));
- state.lat=target.lat;state.lon=target.lon;syncDistanceUnits();clearTiles();scheduleDraw();
+ // Wheel and button zooms animate continuously and preserve the position under
+ // the cursor. Repeated wheel events extend the target rather than restarting
+ // from rounded integer zoom levels.
+ const target=clamp((zoomGoal??state.zoom)+delta,2,19);
+ if(Math.abs(target-state.zoom)<1e-6)return;
+ const anchor=screenToGeo(anchorX,anchorY),startZoom=state.zoom;
+ cancelViewAnimation();
+ if(matchMedia('(prefers-reduced-motion: reduce)').matches){
+  setAnchoredZoom(target,anchor.lat,anchor.lon,anchorX,anchorY);return;
+ }
+ zoomGoal=target;
+ const start=performance.now(),duration=350;
+ function frame(now){
+  const t=clamp((now-start)/duration,0,1),ease=1-(1-t)**3;
+  setAnchoredZoom(startZoom+(target-startZoom)*ease,anchor.lat,anchor.lon,anchorX,anchorY);
+  if(t<1)viewAnimation=requestAnimationFrame(frame);
+  else{viewAnimation=0;zoomGoal=null}
+ }
+ viewAnimation=requestAnimationFrame(frame);
+}
+function pinchZoom(ratio,anchorX,anchorY){
+ if(!Number.isFinite(ratio)||ratio<=0)return;
+ const delta=Math.log2(ratio);
+ if(Math.abs(delta)<0.00001)return;
+ const anchor=screenToGeo(anchorX,anchorY);
+ cancelViewAnimation();
+ // Finger gestures follow the fingers directly, without integer zoom steps.
+ setAnchoredZoom(state.zoom+delta,anchor.lat,anchor.lon,anchorX,anchorY);
 }
 function animateToLocation(lat,lon,zoomTarget){
  cancelViewAnimation();
@@ -345,46 +403,117 @@ function animateToLocation(lat,lon,zoomTarget){
  }
  viewAnimation=requestAnimationFrame(frame);
 }
-function clearTiles(){for(const t of tiles.values())t.remove();tiles.clear();tileLoaded=0;tileFailures=0}
-function switchBasemap(id,message=''){state.basemap=id;$('basemap').value=id;$('attribution').textContent=id==='esri'?MAPS.esri.credit:MIXED_IMAGERY_CREDIT;if(message)$('mapHint').textContent=message}
+function clearTiles(){
+ for(const t of tiles.values())t.remove();tiles.clear();
+ for(const t of oldTiles.values())t.remove();oldTiles.clear();
+ activeTileLevel=null;oldTileLevel=null;tileStageReady=false;
+ tileLoaded=0;tileFailures=0;
+}
+function switchBasemap(id,message=''){state.basemap=id;$('basemap').value=id;activeImageryProvider=null;failedUSGSTiles.clear();if(message)$('mapHint').textContent=message}
 function resize(){const rect=mapEl.getBoundingClientRect();width=Math.max(1,Math.round(rect.width));height=Math.max(1,Math.round(rect.height));dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);canvas.style.width=width+'px';canvas.style.height=height+'px';ctx.setTransform(dpr,0,0,dpr,0,0);scheduleDraw()}
 function scheduleDraw(){if(drawPending)return;drawPending=true;requestAnimationFrame(()=>{drawPending=false;if(width&&height){drawTiles();drawMarkers()}})}
+function positionTileLayer(layer,level){
+ if(level===null)return;
+ const scale=2**(state.zoom-level),c=center();
+ const left=(c.x-width/2)/scale,top=(c.y-height/2)/scale;
+ for(const [key,img] of layer){
+  const pieces=key.split('/'),tx=Number(pieces[2]),ty=Number(pieces[3]);
+  // Keys carry the canonical wrapped x. Use the closest horizontal world copy.
+  const n=2**level,nearWorld=Math.round((left/256-tx)/n);
+  const x=tx+nearWorld*n;
+  img.style.left=((x*256-left)*scale)+'px';
+  img.style.top=((ty*256-top)*scale)+'px';
+  img.style.width=(256*scale)+'px';img.style.height=(256*scale)+'px';
+ }
+}
+function updateTileTransition(needed){
+ if(!oldTiles.size){
+  // On first load, reveal individual tiles as they arrive.
+  for(const img of tiles.values())img.style.visibility='visible';
+  tileStageReady=[...needed].every(key=>{const img=tiles.get(key);return img&&img.complete&&img.naturalWidth>0});
+  return;
+ }
+ const ready=[...needed].every(key=>{const img=tiles.get(key);return img&&img.complete&&img.naturalWidth>0});
+ if(ready){
+  for(const img of oldTiles.values())img.remove();oldTiles.clear();oldTileLevel=null;
+  tileStageReady=true;
+  for(const img of tiles.values())img.style.visibility='visible';
+ }else{
+  // Never mix old and new imagery within one visible frame: the outgoing
+  // complete tile layer remains visible until its replacement is ready.
+  for(const img of tiles.values())img.style.visibility='hidden';
+ }
+}
 function drawTiles(){
- // Fractional display zoom allows smooth programmatic fly-to animations while
- // tile servers receive only valid integer XYZ indices and zoom levels.
- const level=Math.floor(state.zoom),scale=2**(state.zoom-level),n=2**level;
+ // A smooth (fractional) zoom scales existing imagery while new XYZ tiles load.
+ // USGS imagery is kept as long as the configured coverage rule allows.
+ const usgsOnly=state.basemap==='usgs-only';
+ const level=Math.min(Math.floor(state.zoom),usgsOnly?MAX_USGS_ZOOM:19),scale=2**(state.zoom-level),n=2**level;
  const c=center(),left=(c.x-width/2)/scale,top=(c.y-height/2)/scale;
  const x0=Math.floor(left/256)-1,x1=Math.floor((left+width/scale)/256)+1;
  const y0=Math.max(0,Math.floor(top/256)-1),y1=Math.min(n-1,Math.floor((top+height/scale)/256)+1);
+ let provider=viewMapProvider();
+ // Failed USGS tiles trigger whole-view Esri fallback, never tile patchwork.
+ if(provider!=='esri'&&!usgsOnly){
+  for(let tx=x0;tx<=x1;tx++){
+   if(provider==='esri')break;
+   const xt=((tx%n)+n)%n;
+   for(let ty=y0;ty<=y1;ty++){
+    const key=`${provider}/${level}/${xt}/${ty}`;
+    const failureTime=failedUSGSTiles.get(key);
+    if(failureTime!==undefined){
+     if(Date.now()-failureTime<USGS_FAILURE_RETRY_MS){provider='esri';break}
+     failedUSGSTiles.delete(key);
+    }
+   }
+  }
+ }
+ if(provider!==activeImageryProvider||level!==activeTileLevel){
+  // Preserve the last complete tile set as a scaled backdrop. Clearing tiles
+  // here caused the abrupt blank frames seen during integer zoom changes.
+  for(const img of oldTiles.values())img.remove();oldTiles.clear();
+  if(tileStageReady&&tiles.size){
+   oldTiles=tiles;oldTileLevel=activeTileLevel;
+   for(const img of oldTiles.values())img.style.zIndex='0';
+  }else{
+   for(const img of tiles.values())img.remove();
+  }
+  tiles=new Map();tileStageReady=false;
+  activeImageryProvider=provider;activeTileLevel=level;
+  tileLoaded=0;tileFailures=0;
+ }
+ $('attribution').textContent=MAPS[provider].credit;
  const needed=new Set();
  for(let tx=x0;tx<=x1;tx++)for(let ty=y0;ty<=y1;ty++){
-  const xt=((tx%n)+n)%n;
-  const provider=tileMapProvider(level,xt,ty);
-  const key=`${state.basemap}/${provider}/${level}/${xt}/${ty}`;
+  const xt=((tx%n)+n)%n,key=`${provider}/${level}/${xt}/${ty}`;
   needed.add(key);
   let img=tiles.get(key);
   if(!img){
    img=document.createElement('img');img.alt='';img.decoding='async';img.draggable=false;
-   img.onload=()=>{if(tiles.get(key)===img)tileLoaded++};
+   img.style.zIndex='1';
+   img.style.visibility=oldTiles.size?'hidden':'visible';
+   img.onload=()=>{if(tiles.get(key)===img){tileLoaded++;scheduleDraw()}};
    img.onerror=()=>{
     if(tiles.get(key)!==img)return;
     tileFailures++;
-    if(provider!=='esri'&&!img.dataset.fallback){
-     // Only the affected tile falls back; the selected basemap does not change.
-     img.dataset.fallback='esri';
-     img.src=MAPS.esri.url.replace('{z}',level).replace('{x}',xt).replace('{y}',ty);
+    if(provider!=='esri'&&!usgsOnly){
+     failedUSGSTiles.set(key,Date.now());
+     // Keep the previous complete layer through the source change.
+     scheduleDraw();
     }else{
      img.style.visibility='hidden';
-     if(tileFailures>5&&!tileLoaded)$('mapHint').textContent='Imagery unavailable. Check connectivity.';
+     if(tileFailures>5&&!tileLoaded)$('mapHint').textContent=usgsOnly?'USGS imagery unavailable here at this zoom.':'Imagery unavailable. Check connectivity.';
     }
    };
-   img.src=MAPS[provider].url.replace('{z}',level).replace('{x}',xt).replace('{y}',ty);
    tiles.set(key,img);tileEl.append(img);
+   img.src=MAPS[provider].url.replace('{z}',level).replace('{x}',xt).replace('{y}',ty);
   }
   img.style.left=((tx*256-left)*scale)+'px';img.style.top=((ty*256-top)*scale)+'px';
   img.style.width=(256*scale)+'px';img.style.height=(256*scale)+'px';
  }
  for(const [key,img] of tiles)if(!needed.has(key)){img.remove();tiles.delete(key)}
+ positionTileLayer(oldTiles,oldTileLevel);
+ updateTileTransition(needed);
 }
 
 function netClass(v){v=String(v).toLowerCase();return v.includes('autocross mobile')?'mobile':v.includes('rtk2go')?'rtk2go':v.includes('centipede')||v.includes('crtk')?'centipede':v.includes('earthscope')||v.includes('nota')?'earthscope':'other'}
@@ -451,20 +580,18 @@ function refreshRadiusLabel(){
  $('radiusMid').textContent=`${values[Math.floor(values.length/2)]} ${useUSUnits?'mi':'km'}`;
  $('radiusMax').textContent=`${values.at(-1)} ${useUSUnits?'mi':'km'}`;
  $('radius').setAttribute('aria-valuetext',$('radiusDisplay').textContent);
- // The selected radius bounds the search. Individual station estimates use their actual distances.
+ // The radius is a screening limit; it does not describe every station inside it.
  const note=$('radiusQuality');
- let message;
- if(km<=10){
-  message='Short-range search: nearby bases generally favor reliable centimeter-level RTK fixes, given good reception and corrections.';
- }else if(km<=20){
-  message='Moderate-range search: centimeter-level RTK may be possible, but fix reliability becomes more dependent on local conditions.';
- }else if(km<=30){
-  message='Extended-range search: stations near the edge exceed ~20 km. RTK fixes may become unreliable; meter-level errors are possible after losing fix.';
+ const risk=baselineRisk(km);
+ if(risk){
+  note.textContent=`Stations near the radius limit: ${risk}`;
+ }else if(km<=10){
+  note.textContent='Short-range search: nearby bases generally favor reliable RTK fixes given good reception and corrections.';
  }else{
-  message='Long-range search: faraway stations may give unreliable RTK fixes and meter-level errors. Prefer a closer base when available.';
+  note.textContent='Moderate-range search: centimeter-level RTK may be possible; reliability depends on reception and corrections.';
  }
- note.textContent=message;
- note.classList.toggle('caution',km>20);
+ note.classList.toggle('danger',Boolean(risk));
+ note.classList.remove('caution');
 }
 function syncDistanceUnits(){
  const point=state.site||state;
@@ -482,19 +609,26 @@ function zoomForRadius(lat,km){
  const zoomLevel=Math.log2(availablePixels*156543.03392*Math.cos(lat*Math.PI/180)/radiusMeters);
  return clamp(Math.floor(zoomLevel),2,19);
 }
+function baselineRisk(km){
+ if(km>RTK_CUTOFF_KM)return 'RTK will not work at this distance.';
+ if(km>RTK_HIGH_RISK_KM)return 'RTK is highly unreliable at this distance.';
+ if(km>RTK_CAUTION_KM)return 'RTK may be unreliable at this distance.';
+ return '';
+}
 function accuracyText(km){
- // Illustrative horizontal RTK assumption: 1 cm + 1 ppm of baseline distance.
+ // Illustrative horizontal model; do not extrapolate it past the 50 km cutoff.
+ if(km>RTK_CUTOFF_KM)return null;
  const staticMm=10+km,lo=2*staticMm,hi=3*staticMm;
  return {staticMm:staticMm.toFixed(1),lowMm:lo.toFixed(1),highMm:hi.toFixed(1),
   staticIn:(staticMm/25.4).toFixed(1),lowIn:(lo/25.4).toFixed(1),highIn:(hi/25.4).toFixed(1)};
 }
 function baselineReliabilityNote(km){
- if(km<=NOMINAL_BASELINE_KM)return '';
- if(km<=LONG_BASELINE_KM)return '<div class="estimate-warning">Beyond the 20 km u-blox accuracy specification; these values are extrapolated.</div>';
- return '<div class="estimate-warning">Long baseline (>30 km): RTK fix reliability and actual accuracy may deteriorate substantially. Values are extrapolated.</div>';
+ const message=baselineRisk(km);
+ return message?`<div class="estimate-warning" role="alert">${message}</div>`:'';
 }
 function popupAccuracyBlock(km){
  const e=accuracyText(km);
+ if(!e)return baselineReliabilityNote(km);
  return `<div class="popup-accuracy">Static: ±${e.staticMm} mm (±${e.staticIn} in)<br>`+
  `At-speed estimate: ±${e.lowMm}–${e.highMm} mm (±${e.lowIn}–${e.highIn} in)</div>`+
  baselineReliabilityNote(km);
@@ -633,10 +767,10 @@ function renderDetails(){
  const est=km===null?null:accuracyText(km);
  const estimateBlock=km===null?`<div class="distance-hero"><div class="range-head">Select a site to calculate distance and accuracy</div></div>`:
  `<div class="distance-hero"><div class="range-head">${esc(site)} from site</div>
- <div class="accuracy-main">Best-case static: ±${est.staticMm} mm (±${est.staticIn} in)</div>
- <div class="accuracy-main">Typical at-speed estimate: ±${est.lowMm}–${est.highMm} mm (±${est.lowIn}–${est.highIn} in)</div>
+ ${est?`<div class="accuracy-main">Best-case static: ±${est.staticMm} mm (±${est.staticIn} in)</div>
+ <div class="accuracy-main">Typical at-speed estimate: ±${est.lowMm}–${est.highMm} mm (±${est.lowIn}–${est.highIn} in)</div>`:''}
  ${baselineReliabilityNote(km)}
- <div class="estimate-note">Illustrative horizontal estimate using 10 mm + 1 ppm × baseline; at-speed range assumes 2–3× static. Not a measurement or guarantee. u-blox qualifies this formula to 20 km.</div></div>`;
+ ${est?'<div class="estimate-note">Illustrative horizontal estimate using 10 mm + 1 ppm × baseline; at-speed range assumes 2–3× static. Not a measurement or guarantee.</div>':''}</div>`;
  const sourceUrl=s.caster?`${s.caster}:${s.port||2101}`:'Not reported';
  const conn=roverSettings(s);
  box.innerHTML=`<div class="detail-title">${esc(s.name)} <span class="badge">${esc(s.network)}</span></div>
@@ -817,8 +951,12 @@ mapEl.addEventListener('pointermove',e=>{
   const other=[...pointerMap.entries()].find(([id])=>id!==e.pointerId)?.[1];
   if(other){
    const next=Math.hypot(e.clientX-other.x,e.clientY-other.y);
-   if(pinchDistance&&next/pinchDistance>=1.32){zoom(1);pinchDistance=next}
-   else if(pinchDistance&&next/pinchDistance<=.76){zoom(-1);pinchDistance=next}
+   if(pinchDistance){
+    const bounds=mapEl.getBoundingClientRect();
+    const midX=(e.clientX+other.x)/2-bounds.left,midY=(e.clientY+other.y)/2-bounds.top;
+    pinchZoom(next/pinchDistance,midX,midY);
+   }
+   pinchDistance=next;
   }
  }
  p.x=e.clientX;p.y=e.clientY;
@@ -834,7 +972,12 @@ function releasePointer(e){
 mapEl.addEventListener('pointerup',releasePointer);
 mapEl.addEventListener('pointercancel',e=>{pointerMap.delete(e.pointerId);gestureCancelled=true;mapEl.classList.remove('is-panning')});
 mapEl.addEventListener('pointerleave',()=>mapEl.classList.remove('is-marker'));
-mapEl.addEventListener('wheel',e=>{e.preventDefault();const b=mapEl.getBoundingClientRect();zoom(e.deltaY<0?1:-1,e.clientX-b.left,e.clientY-b.top)},{passive:false});
+mapEl.addEventListener('wheel',e=>{
+ e.preventDefault();if(!e.deltaY)return;
+ const b=mapEl.getBoundingClientRect();
+ const pixels=e.deltaY*(e.deltaMode===1?24:e.deltaMode===2?height:1);
+ zoom(clamp(-pixels/110,-1,1),e.clientX-b.left,e.clientY-b.top);
+},{passive:false});
 $('zoomIn').onclick=()=>zoom(1);$('zoomOut').onclick=()=>zoom(-1);
 $('basemap').onchange=e=>{switchBasemap(e.target.value);$('mapHint').textContent='Tap colored dots for NTRIP details · flags search nearby casters · drag to pan';clearTiles();scheduleDraw()};
 $('closePopup').onclick=()=>{$('popup').hidden=true};
