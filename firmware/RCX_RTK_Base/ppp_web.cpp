@@ -59,7 +59,7 @@ input{font:inherit;background:#0d1017;color:var(--ink);border:1px solid var(--li
  <div class="card">
   <h2>Control</h2>
   <div style="display:flex;gap:8px;align-items:center">
-   <input id="dur" type="text" inputmode="numeric" value="00:15:00" autocomplete="off">
+   <input id="dur" type="text" inputmode="numeric" value="01:00:00" autocomplete="off">
    <span class="k">hh:mm:ss</span>
    <button onclick="pppStart()">Start PPP survey</button>
    <button class="sec" onclick="pppAbort()">Abort</button>
@@ -89,9 +89,21 @@ function durToSec(v){
 function secToDur(s){s=Math.max(0,Math.floor(+s||0));
  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
  return (h<10?'0':'')+h+':'+(m<10?'0':'')+m+':'+(x<10?'0':'')+x;}
+// One request at a time with a deadline (as on the dashboard): while the device is busy,
+// queued polls tied up sockets and buttons waited behind them.
+let busy=false;
+// Shortest survey time the device accepts (venue check window + settle), from /api/ppp.
+let minSec=0;
 async function poll(){
+ if(busy) return;
+ busy=true;
+ let tm=null;
  try{
-  const p=await (await fetch('/api/ppp')).json();
+  // No AbortController (iOS before 12.1): a plain fetch rather than a dead page.
+  const ac=(typeof AbortController==='function')?new AbortController():null;
+  if(ac) tm=setTimeout(()=>ac.abort(),5000);
+  const p=await (await fetch('/api/ppp',ac?{cache:'no-store',signal:ac.signal}:{cache:'no-store'})).json();
+  if(p.minsec) minSec=p.minsec;
   const st=document.getElementById('state');st.textContent=p.state;
   st.className='pill '+(p.state=='DONE'?'good':p.state=='FAILED'?'bad':p.state=='SURVEYING'?'warn':'');
   const pct=p.dur?Math.min(100,Math.floor(100*p.elapsed/p.dur)):0;
@@ -104,71 +116,114 @@ async function poll(){
   document.getElementById('epe').textContent=f(p.epe2d)+' / '+f(p.epe3d)+(p.conv?' \u2713':'');
   document.getElementById('best').textContent=f(p.best2d)+' / '+f(p.best3d);
   document.getElementById('lim').textContent=f(p.lim2d)+' / '+f(p.lim3d);
-  // A survey that ends with too few accepted samples locks the unfiltered autonomous mean
-  // instead of the converged one, and the difference is invisible unless the reason is
-  // stated. Naming which gate is doing the rejecting turns "PPP isn't working" into a
-  // number to act on.
+  // Which mean the lock uses is decided by a rule (converged PPP replaces the average of all
+  // fixes once it has run long enough and its halves agree); the device states the rule and
+  // its numbers in p.why. Below it, naming which gate is rejecting fixes turns "PPP isn't
+  // working" into a number to act on.
   const gn=document.getElementById('gateNote');
-  if(p.best2d==null||p.best3d==null){ gn.textContent='No EPE reported yet.'; }
-  else if(p.samples>=p.need){ gn.textContent='Converged set is large enough to lock.'; }
+  let gate='';
+  if(p.state=='SURVEYING'&&!p.pppsol){
+   // Only PPP-solution fixes can converge; until the receiver reports one, every fix goes
+   // into the average of all fixes alone.
+   gate='No PPP solution yet (the receiver reports no PPP station) \u2014 fixes are averaged, none count as converged.'; }
+  else if(p.scat!=null && p.scat<=p.scatlim){ gate='Converging on measured scatter ('+f(p.scat,3)+' m).'; }
+  else if(p.best2d==null||p.best3d==null){ gate='No EPE reported yet.'; }
   else {
    const b2=p.best2d>p.lim2d, b3=p.best3d>p.lim3d;
-   const scatOk = p.scat!=null && p.scat<=p.scatlim;
-   gn.textContent = scatOk
-     ? ('Converged on measured scatter ('+f(p.scat,3)+' m) — '+p.samples+' of '+p.need+' needed.')
-     : ((b2||b3)
-        ? ('Rejecting every fix: best '+(b2?('2D '+f(p.best2d)+' m > '+f(p.lim2d)):'')+
+   if(b2||b3) gate='Rejecting every fix: best '+(b2?('2D '+f(p.best2d)+' m > '+f(p.lim2d)):'')+
            (b2&&b3?' and ':'')+(b3?('3D '+f(p.best3d)+' m > '+f(p.lim3d)):'')+
-           ' m, and scatter '+(p.scat==null?'not yet measured':f(p.scat,3)+' m > '+f(p.scatlim)+' m')+'.')
-        : ('Accepting fixes — '+p.samples+' of '+p.need+' needed.'));
+           ' m, and scatter '+(p.scat==null?'not yet measured':f(p.scat,3)+' m > '+f(p.scatlim)+' m')+'.';
   }
-  document.getElementById('samples').textContent=p.samples;
+  gn.textContent=(p.why?(p.why.charAt(0).toUpperCase()+p.why.slice(1)+'. '):'')+gate;
+  document.getElementById('samples').textContent=p.samples+' of '+p.need+' needed';
   document.getElementById('valid').textContent=p.valid;
-  document.getElementById('pos').textContent=p.lat==null?'\u2013':(f(p.lat,9)+', '+f(p.lon,9));
+  // Once the lock has decided, the coordinate it locked, named by the set it came from; an
+  // unconverged lock's converged-set mean is thin or empty and is not what the base uses.
+  // Before that, the converged-set mean as it builds.
+  document.getElementById('pos').textContent=p.lklat!=null
+   ?(f(p.lklat,9)+', '+f(p.lklon,9)+(p.lkconv?' (locked: converged PPP mean)':' (locked: UNCONVERGED average of all fixes)'))
+   :(p.lat==null?'– (no converged fixes yet)':(f(p.lat,9)+', '+f(p.lon,9)+' (converged-set mean, '+p.samples+' fixes)'));
   document.getElementById('ecef').textContent=p.x==null?'\u2013':(f(p.x,2)+', '+f(p.y,2)+', '+f(p.z,2));
- }catch(e){}
+ }catch(e){
+  // Say so rather than leave the last state (e.g. "SURVEYING 45%") on screen as if live.
+  const st=document.getElementById('state'); st.textContent='NO REPLY'; st.className='pill bad';
+ }finally{ if(tm) clearTimeout(tm); busy=false; }
 }
 setInterval(poll,1500);poll();
 function pppStart(){
  const note=document.getElementById('durNote');
  const sec=durToSec(document.getElementById('dur').value);
  // Echo the interpreted duration back, so a value that was read differently than it was
- // meant is obvious before a survey window has been spent on it.
- if(isNaN(sec)||sec<30||sec>86400){
-  note.textContent='Enter a duration between 00:00:30 and 24:00:00.';return;}
+ // meant is obvious before a survey window has been spent on it. The minimum is the
+ // device's (minSec); until the first poll the device's own check decides.
+ if(isNaN(sec)||sec<Math.max(1,minSec)||sec>86400){
+  note.textContent='Enter a duration between '+secToDur(Math.max(1,minSec))+' and 24:00:00'+
+   (minSec?' (the venue check needs '+minSec+' s to confirm a survey).':'.');return;}
  document.getElementById('dur').value=secToDur(sec);
  note.textContent='Starting a '+secToDur(sec)+' survey\u2026';
- fetch('/api/pppstart',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'sec='+sec});}
+ fetch('/api/pppstart',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'sec='+sec})
+  .then(r=>r.ok?null:r.text().then(t=>{note.textContent='Refused: '+t;})).catch(()=>{note.textContent='Request failed';});}
 function pppAbort(){fetch('/api/pppabort',{method:'POST'});}
 </script></body></html>)HTML";
 
 // ── Handlers (reference the stored server/gnss) ──────────────────────────────
-static void ppp_handle_page()  { if (sServer) sServer->send_P(200, "text/html", PPP_PAGE); }
+// Sent through the sketch's bounded, GNSS-draining page writer (see ppp_web.h), never
+// send_P(): one blocking write of this page can hold the main loop for seconds.
+static void ppp_handle_page()  { rcxSendStaticPage("text/html", PPP_PAGE, sizeof(PPP_PAGE) - 1); }
 
 static void ppp_handle_json()  {
-    // Grown for the acceptance-limit and best-2D fields. ppp_survey_status_json() blanks
-    // the whole buffer rather than emitting a truncated object, so an undersized buffer
-    // shows as an empty page instead of a parse error.
-    char buf[640];
-    ppp_survey_status_json(buf, sizeof buf);
+    // Sized for the full object including the averaging-rule fields and their sentence
+    // (about 800 bytes at most). ppp_survey_status_json() blanks the whole buffer rather
+    // than emitting a truncated object, so an undersized buffer shows as an empty page
+    // instead of a parse error. The room held back is for "minsec" (the shortest survey
+    // time the device accepts), appended inside the object here.
+    char buf[1024];
+    constexpr size_t kMinSecRoom = 24;
+    ppp_survey_status_json(buf, sizeof buf - kMinSecRoom);
+    const size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '}')
+        snprintf(buf + len - 1, sizeof buf - (len - 1), ",\"minsec\":%lu}", (unsigned long)rcxMinSurveySec());
     if (sServer) sServer->send(200, "application/json", buf);
 }
 
 static void ppp_handle_start() {
     // Same bounds the dashboard enforces, applied again here because the endpoint is
-    // reachable without it. 0 falls through to the module default in ppp_survey_begin();
-    // anything outside 30 s .. 24 h is a typo rather than an intent.
-    const long raw = (sServer && sServer->hasArg("sec")) ? sServer->arg("sec").toInt() : 0;
-    if (raw != 0 && (raw < 30 || raw > 86400)) {
-        if (sServer) sServer->send(400, "text/plain", "duration must be 30..86400 s");
+    // reachable without it. 0 keeps the configured survey window. The minimum is the venue
+    // check's window plus its settle (rcxMinSurveySec()): a shorter survey could not be
+    // confirmed by that check on a later boot. Over 24 h is a typo rather than an intent.
+    // The whole argument must be a decimal integer (rcxParseWebInt, STRICT NUMBERS FROM THE
+    // WEB in the sketch): "nan", "900s" or "15:00" is refused, never read as a part of itself.
+    const String arg = (sServer && sServer->hasArg("sec")) ? sServer->arg("sec") : String("0");
+    { char d[40]; snprintf(d, sizeof d, "sec=%.32s", arg.c_str()); rcxLogWebAction("pppstart", d); }
+    const long minSec = (long)rcxMinSurveySec();
+    long raw = -1;
+    if (!rcxParseWebInt(arg.c_str(), 0, 86400, raw) || (raw != 0 && raw < minSec)) {
+        char msg[112];
+        snprintf(msg, sizeof msg, "duration must be %ld..86400 s (the venue check needs %ld s to confirm a survey)",
+                 minSec, minSec);
+        if (sServer) sServer->send(400, "text/plain", msg);
         return;
     }
-    if (sGnss) ppp_survey_begin(*sGnss, (uint32_t)raw);
+    // Queued through the sketch's survey gate (rcxRequestPppSurvey), never started here:
+    // calling ppp_survey_begin() from the handler skipped the escape to rover, its verify
+    // and the bookkeeping reset, so on a running base the survey averaged the base's own
+    // echo for its whole window (sim: ~25 min off air).
+    rcxRequestPppSurvey((uint32_t)raw);
     if (sServer) sServer->send(200, "text/plain", "ok");
 }
 
 static void ppp_handle_abort() {
+    rcxLogWebAction("pppabort", "");
+    // Refused while the lock sequence writes the receiver, as /api/force is: an abort between
+    // its save and its restart leaves the module saved as a base at a coordinate the sketch
+    // never adopts. The sequence takes a few seconds; the operator can enter a position or
+    // re-survey once it is done.
+    if (ppp_survey_status().state == PPP_LOCKING) {
+        if (sServer) sServer->send(409, "text/plain", "the survey is locking - the receiver is being written; abort refused");
+        return;
+    }
     ppp_survey_abort();
+    rcxSurveyAbortedByOperator();   // the sketch re-checks the saved position from loop()
     if (sServer) sServer->send(200, "text/plain", "ok");
 }
 

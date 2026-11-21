@@ -29,7 +29,11 @@ static constexpr bool LCD_BOLD_TEXT = true;
 // Configured from the web dashboard's Casters card and stored in NVS.
 
 // ── LG290P Base Configuration ────────────────────────────────────────────────
-static constexpr uint32_t DEFAULT_SURVEY_IN_SEC = 900;
+// Survey window on a device with no saved survey time (first flash, or an NVS value outside
+// the survey time limits). One hour: long enough for PPP to converge and then run the fifth
+// of the unconverged time it needs to replace the all-fix mean (PPP_SURVEY_PPP_TIME_RATIO).
+// A time set from the dashboard is saved in NVS and used instead; this never replaces it.
+static constexpr uint32_t DEFAULT_SURVEY_IN_SEC = 3600;
 static constexpr float DEFAULT_SURVEY_IN_ACC_LIMIT_M = 3.20f;
 static constexpr uint16_t LG290P_REFERENCE_STATION_ID = 290;
 
@@ -161,8 +165,9 @@ static constexpr uint32_t CAST_QUALITY_RECOVER_MS = 5000;
 // 34 h, so anything sustained above a fraction of a percent is a real fault, not noise.
 static constexpr float    CAST_QUALITY_MAX_CRC_FAIL_RATE = 0.02f;   // 2%
 static constexpr uint32_t CAST_QUALITY_CRC_WINDOW_MS     = 30000;
-// Minimum candidates in the window before the rate is meaningful — below this a single
-// failure would read as a 100% failure rate.
+// Floor on the rate's denominator (frame attempts in the window). A thin window is divided
+// by this instead of by its own count, so one failure among a handful of frames reads as
+// 2%, not 100%. See updateCrcFailRate().
 static constexpr uint32_t CAST_QUALITY_CRC_MIN_SAMPLES   = 50;
 
 // Ceiling on the reference coordinate's own accuracy. A survey that "completed" at a

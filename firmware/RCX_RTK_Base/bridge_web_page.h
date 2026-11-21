@@ -2,10 +2,17 @@
 /*
  * bridge_web_page.h — dashboard UI shell (served from PROGMEM)
  * ===========================================================
- * STABILITY: this is a STATIC asset sent with server.send_P() straight from
- * flash — it is never rebuilt per request, so it adds zero heap churn. All live
+ * STABILITY: this is a STATIC asset sent straight from flash by rcxSendStaticPage()
+ * (bounded pieces, GNSS UART drained between them) — it is never rebuilt per request,
+ * so it adds zero heap churn. Every KB added here is more time on the wire. All live
  * data arrives via the small /api/status JSON poll; all actions are tiny POSTs.
- * Keep it dependency-free (vanilla JS) so there are no external fetches.
+ * EDITING THIS PAGE: regenerate bridge_web_page_gz.h in the same change
+ * (python3 qa/qa/pagegz.py <firmware dir>). Browsers that accept gzip are served that
+ * compressed copy. The QA gate fails while it is stale, and the build stops when its
+ * recorded page length differs from this page's.
+ * Keep it dependency-free (vanilla JS, no libraries or CDNs). The one external fetch
+ * is the Esri satellite tile behind the position thumbnails, loaded by the phone's
+ * browser only when the phone has internet; the device never fetches it.
  *
  * API CONTRACT (this file is the CLIENT; the .ino defines the SERVER):
  *   GET  /api/status   → one JSON object polled ~1.5 s. Field names here MUST match
@@ -19,10 +26,11 @@
  *   POST /api/config   — body: time=&acc=  (survey duration / accuracy limit)
  *   POST /api/setname  — body: name=…      (rename this device; applies on reboot)
  *   POST /api/log      — body: ch=&on=     (toggle an SD log channel or the display)
- *   POST /api/force    — force-start casting (operator override of the survey gate)
+ *   POST /api/force    — lock the running survey's average now (409 outside a survey)
  *   POST /api/reconfig — force a full module reconfigure + reset (defers to loop())
  *   POST /api/query    — re-poll module config (debug)
  *   GET  /logs.json, /dl, /rtcm.raw, /caster0|1/raw — log listing/download/debug
+ *   GET  /dl?f=rcx_logbook.csv — the card's running logbook (session times, saved positions)
  *   WiFi networks and casters are added from the dashboard and stored in NVS;
  *   they can be deleted or disabled from there.
  *
@@ -33,7 +41,7 @@
 static const char BRIDGE_INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RCX1 Caster</title>
+<title>RCX RTK Base</title>
 <style>
 :root{--bg:#f2f4f7;--card:#ffffff;--line:#c3c9d4;--ink:#0a0c10;--mut:#4a5260;
 --good:#00661a;--warn:#8a4b00;--bad:#b00020;--accent:#0b4fa8;
@@ -102,7 +110,7 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
 .muted{color:var(--mut);font-size:12.5px}
 .flex{display:flex;gap:8px;flex-wrap:wrap}
 </style></head><body>
-<header><span id="dot" class="dot"></span><h1 id="dev">RCX1 Caster</h1><button type="button" class="btn sec" style="padding:2px 8px;margin-left:8px;font-size:11px" onclick="renameDevice()" title="Rename this device">Rename</button><span id="up" class="muted"></span></header>
+<header><span id="dot" class="dot"></span><h1 id="dev">RCX RTK Base</h1><button type="button" class="btn sec" style="padding:2px 8px;margin-left:8px;font-size:11px" onclick="renameDevice()" title="Rename this device">Rename</button><span id="up" class="muted"></span></header>
 <div class="wrap">
 
   <div class="card" id="cardSvin">
@@ -126,8 +134,11 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
     <div class="row"><span class="k">HDOP</span><span class="v" id="hdop">—</span></div>
     <div class="row"><span class="k">Est. error</span><span class="v" id="epe">—</span></div>
     <div class="row"><span class="k">Lat / Lon</span><span class="v" id="ll">—</span></div>
-    <div class="row"><span class="k">Alt</span><span class="v" id="alt">—</span></div>
+    <div class="row"><span class="k">Alt (MSL)</span><span class="v" id="alt">—</span></div>
+    <div class="row"><span class="k">Alt (ellipsoidal)</span><span class="v" id="altEll">—</span></div>
     <div class="row"><span class="k">Verify on a map</span><span class="v"><a id="llMap" href="#" target="_blank" rel="noopener noreferrer">—</a></span></div>
+    <canvas id="mapLive" width="256" height="256" style="display:none;max-width:100%;margin-top:6px;border-radius:6px"></canvas>
+    <div class="muted" id="mapLiveMsg" style="font-size:12px"></div>
   </div>
 
   <div class="card" id="cardTemp">
@@ -175,6 +186,7 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
 
   <div class="card" id="cardWifi">
     <h2>WiFi Networks</h2>
+    <div class="row"><span class="k">Uplink</span><span id="wfState">…</span></div>
     <div id="wifiList" class="files" style="margin-bottom:10px"><span class="muted">Loading…</span></div>
     <div class="muted" style="margin:10px 0 4px">Add a network</div>
     <div class="row"><span class="k">SSID</span><input id="wfSsid" type="text" placeholder="NetworkName" autocomplete="off" style="flex:1;min-width:0"></div>
@@ -199,7 +211,7 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
       <button onclick="applyCfg(0)">Apply (keep surveying)</button>
       <button class="sec" onclick="applyCfg(1)">Apply &amp; restart survey</button>
       <button class="sec" onclick="act('/api/reconfig',null,'New survey started')">Start new survey</button>
-      <button class="sec" onclick="act('/api/force',null,'Forced base')">Force base now</button>
+      <button class="sec" id="btnLockNow" disabled title="Available while a survey is averaging" onclick="act('/api/force',null,'Locking survey')">Lock survey now</button>
       <button class="sec" onclick="act('/api/reconfig',{full:1},'Full reconfigure')">Full reconfigure</button>
       <button class="sec" onclick="act('/api/query',null,'Queried module')">Read module config</button>
     </div>
@@ -208,7 +220,7 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
       <b>Apply (keep surveying)</b> — retargets the window and accuracy limit immediately. The survey keeps every observation it has already collected; the receiver is not touched.<br>
       <b>Apply &amp; restart survey</b> — same values, but discards collected observations and starts the window over. Still no receiver reset.<br>
       <b>Start new survey</b> — discards the current survey and any saved coordinate in use, and begins a fresh one immediately.<br>
-      <b>Force base now</b> — stops surveying and publishes from the current position immediately. Fast, but the coordinate is only as good as the fix at that moment.<br>
+      <b>Lock survey now</b> — ends the running survey early and locks the average collected so far, with the same checks as a survey that runs its full window. Available only while a survey is averaging; the coordinate is only as good as the time averaged. Until converged PPP has run a fifth as long as the averaging that did not converge (at least one minute; thirty minutes always suffices) and its two halves agree, the coordinate is the average of every fix, possibly metres from the antenna, and is saved and shown as UNCONVERGED with its accuracy; the PPP card says which rule applies and why. To change the coordinate of a running base, use manual position entry.<br>
       <b>Full reconfigure</b> — rewrites the receiver's entire configuration (message set, rates, protocol) and resets it. Takes about 8 s and forces a cold re-acquisition, so corrections stop until it reacquires. Only needed if the module's configuration is in doubt.<br>
       <b>Read module config</b> — asks the receiver what mode and survey settings it currently holds, and shows them above. Read-only; changes nothing.
     </div>
@@ -241,6 +253,8 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
     <div class="row"><span class="k">Saved alt (ellipsoidal)</span><span class="v" id="posAlt">—</span></div>
     <div class="row"><span class="k">Saved H-acc</span><span class="v" id="posAcc">—</span></div>
     <div class="row"><span class="k">Verify on a map</span><span class="v"><a id="posMap" href="#" target="_blank" rel="noopener noreferrer">—</a></span></div>
+    <canvas id="mapSaved" width="256" height="256" style="display:none;max-width:100%;margin-top:6px;border-radius:6px"></canvas>
+    <div class="muted" id="mapSavedMsg" style="font-size:12px"></div>
     <div class="muted" id="posNote" style="margin-top:4px"></div>
     <div class="muted" style="margin:8px 0 4px">Boot position check (statistical, 30 s)</div>
     <div class="row"><span class="k">Check state</span><span class="v" id="pcState">—</span></div>
@@ -252,9 +266,16 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
     <div class="muted" style="margin:12px 0 4px">Manual entry (surveyed / post-processed reference)</div>
     <div class="row"><span class="k">Lat</span><input id="inLat" type="text" inputmode="decimal" placeholder="36.123456789" style="flex:1;min-width:0"></div>
     <div class="row"><span class="k">Lon</span><input id="inLon" type="text" inputmode="decimal" placeholder="-76.123456789" style="flex:1;min-width:0"></div>
-    <div class="row"><span class="k">Alt (m)</span><input id="inAlt" type="text" inputmode="decimal" placeholder="12.34" style="flex:1;min-width:0"></div>
+    <div class="row"><span class="k">Alt (m, ellipsoidal)</span><input id="inAlt" type="text" inputmode="decimal" placeholder="12.34" style="flex:1;min-width:0"></div>
     <button class="btn" style="margin-top:8px" onclick="savePos()">Save &amp; Apply Position</button>
     <div class="muted" id="setposMsg" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Previous Locations</h2>
+    <div class="flex"><button class="btn sec" id="prevBtn" onclick="loadPrevLocations()">Load from logs</button></div>
+    <div class="muted" id="prevMsg" style="margin:6px 0">Lists the base positions saved in the SD card's logbook. Tap a row's coordinates to select them, or press Use to fill the manual entry fields.</div>
+    <div id="prevList"></div>
   </div>
 
   <div class="card">
@@ -266,12 +287,12 @@ pre{background:#0a0c11;border:1px solid var(--line);border-radius:6px;padding:8p
       <button class="btn sec" id="scRefresh" onclick="refreshFiles()" title="Re-scan the card now. Briefly pauses SD logging.">Refresh</button>
     </div>
     <div class="muted" style="margin:10px 0 4px"><span id="filesLabel">Current session</span> — tap a file to download</div>
+    <div class="muted" style="margin:0 0 6px;color:var(--warn)">Casting may be interrupted while logs download.</div>
     <div class="files filelist" id="files">…</div>
+    <div class="muted" style="margin:6px 0 0">All sessions: <a href="/dl?f=rcx_logbook.csv">rcx_logbook.csv</a> (session times and saved positions)</div>
     <div class="muted" style="margin:10px 0 4px">Live RAM captures</div>
     <div class="flex">
       <a class="btn sec" href="/rtcm.raw">Validated RTCM</a>
-      <a class="btn sec" href="/caster0/raw">Caster 1 TX</a>
-      <a class="btn sec" href="/caster1/raw">Caster 2 TX</a>
     </div>
   </div>
 
@@ -361,10 +382,32 @@ function setMapLink(el,lat,lon,label){
 }
 function fmtBytes(b){b=+b||0;if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(2)+' MB';}
 function fmtRate(bps){bps=+bps||0;if(bps<1024)return bps+' B/s';return(bps/1024).toFixed(1)+' KB/s';}
+// fetch() with a deadline. A plain fetch waits as long as the device does, and the device
+// can be busy for 10 s (PPP lock sequence) — see the in-flight guards below.
+// Browsers without AbortController (iOS before 12.1) get a plain fetch with no deadline
+// rather than a page that renders nothing.
+function fetchT(url,opts,ms){
+ if(typeof AbortController!=='function') return fetch(url,opts||{});
+ const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),ms);
+ return fetch(url,Object.assign({},opts||{},{signal:ac.signal})).finally(()=>clearTimeout(t));
+}
+// ONE STATUS REQUEST AT A TIME (keep). setInterval fires every 1.5 s whether or not the last
+// reply came back, so while the device was busy the requests queued up (6 sockets per
+// open page at Chrome's per-host limit), button POSTs waited behind stale polls, and the
+// device served a backlog of answers nobody would read.
+// A call that arrives while one is in flight (e.g. the refresh after a button press) is
+// remembered and run once more when the current one finishes, so it is never lost.
+let pollBusy=false, pollAgain=false;
 async function poll(){
+ if(pollBusy){ pollAgain=true; return; }
+ pollBusy=true;
+ try{ do{ pollAgain=false; await pollOnce(); }while(pollAgain); } finally{ pollBusy=false; }
+}
+async function pollOnce(){
  try{
-  const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();
-  $('dev').textContent=d.dev; $('dot').classList.toggle('on',!!d.wifi);
+  const r=await fetchT('/api/status',{cache:'no-store'},5000);const d=await r.json();
+  $('dev').textContent=d.dev; if(d.dev&&document.title!==d.dev)document.title=d.dev;   // tab title follows the device name
+  $('dot').classList.toggle('on',!!d.wifi);
   // One-time Centipede defaults for the "Add a caster" form — only while every field is
   // still untouched, so this never clobbers something the operator is mid-typing.
   if(!casterDefaultsSet&&!$('cHost').value&&!$('cMount').value&&!$('cPw').value){
@@ -374,7 +417,9 @@ async function poll(){
    $('cPw').value='centipede';
   }
   $('up').textContent=(d.wifi?(d.ssid+' · '+d.ip+' · '):'')+'up '+fmtDur(d.up);
+  $('up').title=d.core?('arduino-esp32 core/ESP-IDF '+d.core):'';   // build platform, hover to see
   const s=d.svin||{};
+  { const b=$('btnLockNow'); if(b) b.disabled=!s.lockable; }   // device decides; see forceLockAvailable()
   const sp0=d.savedpos||{};
   // Reference source: a manually-entered or reused saved position is a FIXED REFERENCE,
   // not a survey-in. Distinguish it so the card doesn't masquerade as an active survey.
@@ -411,6 +456,10 @@ async function poll(){
     ? ((mo.mode===2?'base':'rover')+', svin '+(mo.svin===1?'survey-in':(mo.svin===2?'fixed':'—'))+
        ', '+secToDur(mo.dur||0)+', '+(mo.acc||0).toFixed(2)+' m')
     : 'not probed yet';
+  // mo.refused: the device stopped resetting a receiver that will not take base mode or
+  // the adopted coordinate; shown here and as the caster hold reason until it clears.
+  if(mo.refused){ $('modCfg').textContent+=' — '+mo.refused; }
+  cls($('modCfg'), mo.refused?'bad':'');
   cardState('cardSvin', worstOf(noSignal?'bad':(isFixed?'good':'warn'), s.valid==2?'good':'warn'));
   // Accuracy: never render 0.000 m for a state where nothing is known — that reads as a
   // perfect survey and is the most precise-looking value the format can produce. The
@@ -428,11 +477,15 @@ async function poll(){
   $('svinObs').textContent=secToDur(s.obs||0)+' / '+secToDur(s.target||0);
   const p=d.pos||{};
   // GGA field 6 quality indicator. Decoded because the bare number is meaningless at a
-  // glance, and 5 in particular is ambiguous on this module: it covers both RTK float
-  // and a converged PPP solution (they are told apart by the station ID, not by this).
+  // glance. 5 is the RTK-float code, and this module reports its PPP solution with the same
+  // code, told apart by the PPP service's station ID in GGA field 14 (pppsol.sta: 9002 E6
+  // HAS, 9001 B2b), as the LCD's label is.
   const FIXQ={0:'No fix',1:'3D / autonomous',2:'DGPS',3:'PPS',4:'RTK fixed',
-              5:'RTK float / PPP',6:'Dead reckoning',7:'Manual / base',8:'Simulation'};
-  $('fix').textContent=p.fix+' — '+(FIXQ[p.fix]||'unknown');
+              5:'RTK float',6:'Dead reckoning',7:'Manual / base',8:'Simulation'};
+  const fixSta=(d.pppsol||{}).sta;
+  const fixTxt=(p.fix===5&&(fixSta===9002||fixSta===9001))?('PPP ('+(fixSta===9002?'E6 HAS':'B2b')+')')
+              :(FIXQ[p.fix]||'unknown');
+  $('fix').textContent=p.fix+' — '+fixTxt;
   cls($('fix'),p.fix>=4?'good':(p.fix>0?'warn':'bad'));
   $('sats').textContent=p.sats; cls($('sats'),band(p.sats,12,7,true));
   $('hdop').textContent=(p.hdop||0).toFixed(2); cls($('hdop'),band(p.hdop,1.0,2.0,false));
@@ -442,7 +495,9 @@ async function poll(){
                                band(p.epe,1.0,3.0,false)));
   $('ll').textContent=fmtLatLon(p.lat,p.lon);
   $('alt').textContent=(p.alt||0).toFixed(2)+' m';
+  $('altEll').textContent=p.hell?(p.hell.toFixed(2)+' m'):'—';
   setMapLink($('llMap'),p.lat,p.lon,'Open live fix in Google Maps');
+  mapThumb('mapLive',p.lat,p.lon);
   const tp=d.temp||{};
   if(tp.chipOk){$('chipT').textContent=(tp.chipF||0).toFixed(0)+' °F';cls($('chipT'),tband(tp.chipF,true));}
   else{$('chipT').textContent='—';cls($('chipT'),'');}
@@ -461,7 +516,7 @@ async function poll(){
   // accuracy on every rover connected — silently, since the message itself is fine.
   const an=d.ant||{};
   $('antDesc').textContent = !an.seen ? '— (no 1033 yet)'
-                           : (an.len ? esc(an.desc) : 'empty — rovers apply no phase-centre correction');
+                           : (an.len ? an.desc : 'empty — rovers apply no phase-centre correction');   // textContent: no escaping
   cls($('antDesc'), !an.seen ? 'muted' : (an.len ? 'good' : 'warn'));
   // Correction-quality gate. This is the answer to "is this device publishing, and if
   // not, why not" — distinct from the survey card, which only says whether the survey
@@ -500,6 +555,13 @@ async function poll(){
              : 'PPP is enabled but no Galileo E6 signals are being tracked — HAS corrections cannot arrive, so the survey is averaging ordinary autonomous fixes.')
     : (pp.sup===0 ? (pp.cfg||'The module rejected PQTMCFGPPP.')
                   : 'Press "Read module config" to ask the receiver directly.');
+  // pp.fail: the receiver's own output makes every survey fail (the survey keeps retrying);
+  // it also becomes the caster hold reason.
+  // While a survey averages: which mean a lock now would use, and the numbers behind it.
+  if(surveying && pp.why){ $('pppNote').textContent=($('pppNote').textContent?($('pppNote').textContent+' · '):'')+'Lock now: '+pp.why; }
+  if(pp.fail){ $('pppNote').textContent=pp.fail; }
+  cls($('pppNote'), pp.fail?'bad':'');
+  $('pppNote').classList.toggle('muted', !pp.fail);   // .muted is declared after .bad and would grey it
   const rt=d.rtcm||{};
   // INTERNAL SIGNAL ONLY — this says the receiver is producing RTCM observations for
   // us, not that anything is being published. Whether corrections actually reach the
@@ -530,8 +592,10 @@ async function poll(){
   let h='', casterWorst='';
   {
     lcOn = !!lc.on;
-    const lcKlass = lc.on ? (lc.clients>0 ? 'good' : 'warn') : 'muted';
-    const lcLabel = lc.on ? ((lc.clients||0)+' rover'+(lc.clients===1?'':'s')+' connected') : 'Disabled';
+    // While the base is not publishable (d.held) the local caster sends nothing, the same
+    // gate the upstream casters apply, so connected rovers are shown as held.
+    const lcKlass = lc.on ? ((lc.clients>0 && !d.held) ? 'good' : 'warn') : 'muted';
+    const lcLabel = lc.on ? ((lc.clients||0)+' rover'+(lc.clients===1?'':'s')+' connected'+(d.held?' · held, base not publishable':'')) : 'Disabled';
     // Both addresses are listed when there is an uplink: the LAN address is the one a
     // rover already on the same network uses, and the AP address keeps working whether
     // or not the base is joined to anything.
@@ -539,10 +603,17 @@ async function poll(){
     const apAddr  = (lc.apip||'192.168.4.1')+':'+(lc.port||2101);
     h+='<div style="margin-bottom:12px;opacity:'+(lc.on?'1':'0.55')+'">'+
        '<div class="row"><span class="k">'+esc(lc.name||'Local-Wifi')+
-       ' <span class="muted">'+(d.dev||'this base')+'</span></span>'+
+       ' <span class="muted">'+esc(d.dev||'this base')+'</span></span>'+
        '<span class="v '+lcKlass+'">'+lcLabel+'</span></div>';
     if(lc.on){
       h+='<div class="muted">'+(lanAddr?('network '+lanAddr+' · '):'')+'AP '+apAddr+'</div>';
+    }
+    // Owner decision: a rover fed over the AP has priority, so a lost uplink is not searched
+    // for while it is connected (searching would pull the radio off the AP's channel).
+    if(lc.pause===2){
+      h+='<div class="warn">Uplink search paused — local rover has priority. Search resumes about a minute after the rover stops being fed (it disconnects or local casting is turned off).</div>';
+    }else if(lc.pause===1){
+      h+='<div class="muted">Uplink search paused while the dashboard is in use (up to 60 s after the last action).</div>';
     }
     h+='<div class="flex" style="margin-top:6px"><button class="btn sec" style="padding:2px 8px" '+
        'onclick="lcToggle()">'+(lc.on?'Disable':'Enable')+'</button></div></div>';
@@ -553,8 +624,9 @@ async function poll(){
    const ok=c.hand&&c.age>=0&&c.age<10;
    const errored=(c.state==='Error');
    const enabled=(c.en!==0);
-   const hostA=(c.host||'').replace(/'/g,"\\'");
-   const mountA=(c.mount||'').replace(/'/g,"\\'");
+   // Host and mount reach the buttons through data- attributes and the page through esc():
+   // they are operator text stored on the device, and inserted raw any markup in them ran.
+   const hostA=esc(c.host||''), mountA=esc(c.mount||'');
    // Status label. A disabled caster is neutral grey, not an error.
    let label,klass;
    if(!enabled){ label='Disabled'; klass='muted'; }
@@ -562,19 +634,25 @@ async function poll(){
      // The gate that is actually holding it, in its own words. q.why carries the
      // correction-quality reason; falling back to the survey only when quality is fine
      // keeps the label from blaming survey-in for an antenna or frame-integrity fault.
-     const q=d.qual||{};
-     label='Holding — '+(q.ok===0&&q.why ? q.why
-                        : (d.svin&&d.svin.valid==2?'starting up':'survey-in'));
+     const q=d.qual||{}, mr=(d.mod&&d.mod.refused)||'', ps=(d.ppp&&d.ppp.fail)||'';
+     label='Holding — '+(mr ? mr+' — power-cycle the receiver'
+                        : ps ? ps
+                        : q.ok===0&&q.why ? q.why
+                        : (q.refok===0 ? 'confirming the receiver reference position'
+                        : (d.svin&&d.svin.valid==2?'starting up':'survey-in')));
      klass='warn';
    }
-   else if(errored){ label='Error'; klass='bad'; }
+   // c.retry: seconds to the device's next connection attempt while it cools down after a
+   // failure (-1 when not waiting); the reason stays on the line below.
+   else if(errored){ label=c.retry>0?('Error — retry in '+fmtDur(c.retry)):'Error'; klass='bad'; }
+   else if(c.retry>0){ label='Retry in '+fmtDur(c.retry); klass='warn'; }
    else { label=c.state||''; klass=(ok?'good':(c.hand?'warn':'bad')); }
    // A disabled caster is an operator choice and does not colour the card.
    if(enabled) casterWorst=worstOf(casterWorst,klass);
-   const toggle='<button class="btn sec" style="padding:2px 8px" onclick="casterEnable(\''+hostA+'\',\''+mountA+'\','+(enabled?0:1)+')">'+(enabled?'Disable':'Enable')+'</button>';
-   const del='<button class="btn sec" style="padding:2px 8px;margin-left:6px" onclick="casterDel(\''+hostA+'\',\''+mountA+'\')" title="Remove">✕</button>';
-   h+='<div style="margin-bottom:12px;opacity:'+(enabled?'1':'0.55')+'"><div class="row"><span class="k">'+(c.host||('Caster '+(i+1)))+':'+(c.port||2101)+
-      ' <span class="muted">'+(c.mount||'')+'</span></span><span class="v '+klass+'">'+label+'</span></div>';
+   const toggle='<button class="btn sec" style="padding:2px 8px" data-h="'+hostA+'" data-m="'+mountA+'" onclick="casterEnable(this.dataset.h,this.dataset.m,'+(enabled?0:1)+')">'+(enabled?'Disable':'Enable')+'</button>';
+   const del='<button class="btn sec" style="padding:2px 8px;margin-left:6px" data-h="'+hostA+'" data-m="'+mountA+'" onclick="casterDel(this.dataset.h,this.dataset.m)" title="Remove">✕</button>';
+   h+='<div style="margin-bottom:12px;opacity:'+(enabled?'1':'0.55')+'"><div class="row"><span class="k">'+(hostA||('Caster '+(i+1)))+':'+esc(c.port||2101)+
+      ' <span class="muted">'+mountA+'</span></span><span class="v '+klass+'">'+esc(label)+'</span></div>';
    if(enabled && c.err){
      h+='<div class="muted '+(errored?'bad':'')+'">↳ '+esc(c.err)+'</div>';
      if(c.resp) h+='<div class="muted" style="font-size:0.85em;word-break:break-all">↳ caster said: '+esc(c.resp)+'</div>';
@@ -597,6 +675,11 @@ async function poll(){
   if(!(d.casters||[]).length){
     h+='<div class="muted" style="margin-top:4px">No upstream caster configured — corrections are only available to rovers on this base\u2019s own network. Add one below to publish them.</div>';
   }
+  // The reply carries as many casters as fit; ncast is how many are configured.
+  const shownC=(d.casters||[]).length;
+  if(d.ncast>shownC){
+    h+='<div class="warn" style="margin-top:4px">'+(d.ncast-shownC)+' more caster(s) configured but not shown (status reply full).</div>';
+  }
   $('casters').innerHTML=h;
   // The card is only red when there is nowhere at all to get corrections: no upstream
   // caster AND the local one switched off.
@@ -604,17 +687,25 @@ async function poll(){
   // still surveys, logs and serves local rovers — it just cannot reach an upstream
   // caster), red only if the AP is down too, which means nothing can reach the device.
   cardState('cardWifi', d.wifi ? 'good' : (d.local&&d.local.apip ? 'warn' : 'bad'));
+  // What the uplink search is doing, as the LCD footer says it (lvl 3: the last attempt failed).
+  const ws=d.wsrch||{};
+  $('wfState').textContent=d.wifi?('connected to '+d.ssid):(ws.t||'—');
+  cls($('wfState'),d.wifi?'good':(ws.lvl===3?'bad':'warn'));
 
   cardState('castersCard', ((d.casters||[]).length || lc.on) ? (casterWorst||'warn') : 'bad');
   if(d.log){
    document.querySelectorAll('.tg').forEach(t=>t.classList.toggle('on',!!d.log[t.dataset.ch]));
-   $('logNote').textContent=(d.log.sd?('SD ready · session '+String(d.log.session).padStart(4,'0')):'SD NOT ready')+' · dropped records '+d.log.drop;
+   window.curSessionStr=String(d.log.session);
+   $('logNote').textContent=(d.log.sd?('SD ready · session '+String(d.log.session).padStart(4,'0')):(d.log.sdfail?'SD card FAILED - not mounted, nothing is being logged (check or replace the card, then restart)':'SD NOT ready'))+' · dropped records '+d.log.drop+(d.log.shed?(' · sat rows skipped '+d.log.shed):'')+(d.log.wfail?(' · SD WRITE FAILURES '+d.log.wfail+' (card full or failing)'):'');
   }
   if(d.msg){$('mPqtm').textContent=d.msg.pqtm||'—';$('mNmea').textContent=d.msg.nmea||'—';}
   // Saved position card
   const sp=d.savedpos||{};
-  $('posSource').textContent=sp.valid?sp.src||'?':'none';
-  cls($('posSource'),sp.valid?'good':'muted');
+  // ppp-auto is a survey that did not converge: an average that can be metres from the
+  // antenna (see the note and accuracy). Said in words, not left to the source code.
+  const unconv = sp.valid && sp.src==='ppp-auto';
+  $('posSource').textContent=sp.valid?((sp.src||'?')+(unconv?' (UNCONVERGED)':'')):'none';
+  cls($('posSource'),sp.valid?(unconv?'warn':'good'):'muted');
   $('posLat').textContent=sp.valid?fmtDeg(sp.lat):'—';
   $('posLon').textContent=sp.valid?fmtDeg(sp.lon):'—';
   // Saved altitude is ELLIPSOIDAL metres — the value actually fed into the ECEF the base
@@ -622,8 +713,10 @@ async function poll(){
   $('posAlt').textContent=sp.valid?(sp.alt.toFixed(3)+' m'):'—';
   // A manual reference has no measured accuracy — show n/a rather than a fake "0 cm".
   $('posAcc').textContent = sp.valid ? (sp.src==='manual' ? 'n/a (user-entered)'
-                                                          : (sp.hacc*100).toFixed(0)+' cm') : '—';
+                                   : (sp.hacc>=1 ? sp.hacc.toFixed(2)+' m' : (sp.hacc*100).toFixed(0)+' cm')) : '—';
+  cls($('posAcc'), unconv ? 'warn' : '');
   setMapLink($('posMap'), sp.valid?sp.lat:null, sp.valid?sp.lon:null, 'Open saved position in Google Maps');
+  mapThumb('mapSaved', sp.valid?sp.lat:null, sp.valid?sp.lon:null);
   // Provenance of the saved coordinate — how it was actually produced.
   $('posNote').textContent = (sp.valid && sp.note) ? sp.note : '';
   // Boot position-confidence check card
@@ -640,6 +733,7 @@ async function poll(){
   }else{
     $('pcFixes').textContent='—';
   }
+  if(d.cfg&&d.cfg.tmin) cfgTmin=d.cfg.tmin;
   if(!cfgTouched){
    $('cfgTime').value=secToDur((d.cfg&&d.cfg.time)||s.target||0);
    $('cfgAcc').value=(d.cfg&&d.cfg.acc)||'';
@@ -660,17 +754,31 @@ async function clearPos(){
   poll();
 }
 async function savePos(){
-  const lat=$('inLat').value.trim(),lon=$('inLon').value.trim(),alt=($('inAlt').value.trim()||'0');
-  if(!lat||!lon){$('setposMsg').textContent='Enter lat and lon';cls($('setposMsg'),'bad');return;}
+  const lat=$('inLat').value.trim(),lon=$('inLon').value.trim(),alt=$('inAlt').value.trim();
+  // Height is required (ellipsoidal, m): a blank used to be sent as 0 and published a
+  // reference tens of metres below the antenna. The device refuses a missing height too.
+  if(!lat||!lon||!alt){$('setposMsg').textContent='Enter lat, lon and ellipsoidal height';cls($('setposMsg'),'bad');return;}
   try{
-    const r=await fetch('/api/setpos',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon)+'&alt='+encodeURIComponent(alt)});
-    const t=await r.text();
+    const body='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon)+'&alt='+encodeURIComponent(alt);
+    const hdr={'Content-Type':'application/x-www-form-urlencoded'};
+    let r=await fetch('/api/setpos',{method:'POST',headers:hdr,body:body});
+    let t=await r.text();
+    // The device refuses a height far from the current one (likely MSL or a typo). The
+    // operator can confirm it deliberately, e.g. to correct a base whose stored height is wrong.
+    if(r.status===409 && t.indexOf('MSL entered')>=0 &&
+       confirm(t+'\n\nApply this height anyway?')){
+      r=await fetch('/api/setpos',{method:'POST',headers:hdr,body:body+'&heightok=1'});
+      t=await r.text();
+    }
     $('setposMsg').textContent=r.ok?'Saved & applied \u2713':('Error: '+t);
     cls($('setposMsg'),r.ok?'good':'bad');
   }catch(e){$('setposMsg').textContent='Request failed';cls($('setposMsg'),'bad');}
   poll();
 }
 let cfgTouched=false;
+// Shortest survey time the device accepts (venue check window + settle; status cfg.tmin).
+// 0 until the first poll, when the device's own check decides.
+let cfgTmin=0;
 $('cfgTime').addEventListener('input',()=>cfgTouched=true);
 $('cfgAcc').addEventListener('input',()=>cfgTouched=true);
 let lcOn=false;   // mirrors d.local.on from the last poll; see lcToggle()
@@ -721,7 +829,9 @@ function secToDur(s){s=Math.max(0,Math.floor(+s||0));
 // receiver, so there is no cold re-acquisition either way.
 async function applyCfg(restart){
  const t=durToSec($('cfgTime').value),a=$('cfgAcc').value;
- if(isNaN(t)||t<30||t>86400){$('cfgNote').textContent='Survey time must be 00:00:30 to 24:00:00.';return;}
+ if(isNaN(t)||t<Math.max(1,cfgTmin)||t>86400){
+  $('cfgNote').textContent='Survey time must be '+secToDur(Math.max(1,cfgTmin))+' to 24:00:00'+
+   (cfgTmin?' (the venue check needs '+cfgTmin+' s to confirm a survey).':'.');return;}
  $('cfgNote').textContent=restart?'Applying — restarting survey…':'Applying — survey continues…';
  try{
   const p={time:t, acc:a}; if(restart) p.restart=1;
@@ -734,7 +844,7 @@ async function applyCfg(restart){
      'Window '+secToDur(t)+', accuracy limit '+a+' m.';
    cfgTouched=false;
   }else{
-   $('cfgNote').textContent='Error applying.';
+   $('cfgNote').textContent='Error applying: '+(await r.text());
   }
  }catch(e){$('cfgNote').textContent='Request failed';}
 }
@@ -751,9 +861,12 @@ function setScope(s){logScope=s;
 function refreshFiles(){ loadFiles(true); }
 async function loadFiles(force){
  try{const r=await fetch('/logs.json?scope='+logScope+(force?'&refresh=1':''),{cache:'no-store'});const j=await r.json();
-  const note=(logScope!=='all'&&j.total!=null)?(' <span class="muted">('+(j.files||[]).length+' of '+j.total+')</span>'):'';
+  const note=((logScope!=='all'&&j.total!=null)?(' <span class="muted">('+(j.files||[]).length+' of '+j.total+')</span>'):'')+
+   (j.tarskip?(' <span class="muted">· a one-archive download of this set leaves out the '+j.tarskip+' oldest (4 GiB limit)</span>'):'');
   $('filesLabel').innerHTML=scopeLabel[logScope]+note;
-  $('files').innerHTML=(j.files||[]).map(f=>'<div class="row"><span><a href="/dl?f='+encodeURIComponent(f.n)+'">'+f.n+'</a></span><span class="muted">'+f.kb+' KB</span><button type="button" class="btn sec" style="padding:2px 8px;margin-left:8px;flex:0 0 auto" onclick="logDel(\''+f.n+'\')">Del</button></div>').join('')||'<div class="muted">no files</div>';
+  $('files').innerHTML=(j.files||[]).map(f=>'<div class="row"><span><a data-f="'+esc(f.n)+'" href="/dl?f='+encodeURIComponent(f.n)+'">'+esc(f.n)+'</a><br><span class="muted lt" data-f="'+esc(f.n)+'"></span></span><span class="muted">'+esc(f.kb)+' KB</span><button type="button" class="btn sec" style="padding:2px 8px;margin-left:8px;flex:0 0 auto" data-f="'+esc(f.n)+'" onclick="logDel(this.dataset.f)">Del</button></div>').join('')||'<div class="muted">no files</div>';
+  applyLogTimes();
+  annotateLogTimes();
  }catch(e){$('files').innerHTML='<div class="muted">list unavailable</div>';}
 }
 // Deletes one log file. The active session's own files always come back rejected by
@@ -768,6 +881,207 @@ async function logDel(name){
 // The file list is served from a device-side snapshot; a rescan pauses SD logging, so
 // it is requested rarely and on demand rather than on a short timer.
 poll();loadFiles();setInterval(poll,1500);setInterval(loadFiles,300000);
+
+// ── Satellite thumbnail ──────────────────────────────────────────────────────
+// One Esri World Imagery tile at the deepest zoom the service has for the spot, with the
+// position marked on it. Everything happens in this browser: the device only supplies the
+// coordinate. The image needs internet on THIS device (a phone joined only to the base's
+// own access point has none), so every failure path ends in a plain message and a slow
+// retry; nothing here can block or break the dashboard poll.
+const MAP_MAX_ZOOM=19, MAP_MIN_ZOOM=10, MAP_RETRY_MS=60000, MAP_LOAD_TIMEOUT_MS=8000;
+const MAP_TILE_URL='https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/';
+const MAP_ATTRIB='Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community';
+const mapState={};
+function mapTile(lat,lon,z){
+ const n=Math.pow(2,z), x=(lon+180)/360*n, lr=lat*Math.PI/180;
+ const y=(1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n;
+ return {x:Math.floor(x),y:Math.floor(y),fx:x-Math.floor(x),fy:y-Math.floor(y)};
+}
+function mapLoadImg(url,ms){
+ return new Promise(res=>{
+  const im=new Image(); let done=false;
+  const fin=ok=>{ if(done) return; done=true; clearTimeout(tm); res(ok?im:null); };
+  const tm=setTimeout(()=>fin(false),ms);
+  im.onload=()=>fin(true); im.onerror=()=>fin(false);
+  im.src=url;
+ });
+}
+function mapDraw(st,cv,fx,fy){
+ const g=cv.getContext('2d'); g.drawImage(st.img,0,0,cv.width,cv.height);
+ const px=fx*cv.width, py=fy*cv.height;
+ g.lineWidth=3; g.strokeStyle='#ffffff'; g.beginPath(); g.arc(px,py,10,0,6.2832); g.stroke();
+ g.lineWidth=1.5; g.strokeStyle='#d00000'; g.beginPath(); g.arc(px,py,10,0,6.2832); g.stroke();
+ g.beginPath(); g.moveTo(px-16,py); g.lineTo(px+16,py); g.moveTo(px,py-16); g.lineTo(px,py+16); g.stroke();
+}
+async function mapFetchBest(lat,lon){
+ // Deepest zoom first. If the deepest fails, a shallow probe separates "no internet" from
+ // "no imagery that deep here" before stepping down, so an offline phone costs two requests.
+ const top=await mapLoadImg(MAP_TILE_URL+MAP_MAX_ZOOM+'/'+mapTile(lat,lon,MAP_MAX_ZOOM).y+'/'+mapTile(lat,lon,MAP_MAX_ZOOM).x,MAP_LOAD_TIMEOUT_MS);
+ if(top) return {img:top,z:MAP_MAX_ZOOM};
+ const probe=await mapLoadImg(MAP_TILE_URL+MAP_MIN_ZOOM+'/'+mapTile(lat,lon,MAP_MIN_ZOOM).y+'/'+mapTile(lat,lon,MAP_MIN_ZOOM).x,MAP_LOAD_TIMEOUT_MS);
+ if(!probe) return null;
+ for(let z=MAP_MAX_ZOOM-1;z>MAP_MIN_ZOOM;z--){
+  const t=mapTile(lat,lon,z);
+  const im=await mapLoadImg(MAP_TILE_URL+z+'/'+t.y+'/'+t.x,MAP_LOAD_TIMEOUT_MS);
+  if(im) return {img:im,z:z};
+ }
+ return {img:probe,z:MAP_MIN_ZOOM};
+}
+function mapThumb(id,lat,lon){
+ try{
+  const cv=$(id), msg=$(id+'Msg'); if(!cv||!msg) return;
+  const ok=lat!=null&&lon!=null&&isFinite(lat)&&isFinite(lon)&&(Math.abs(lat)>1e-6||Math.abs(lon)>1e-6)&&Math.abs(lat)<85;
+  if(!ok){ cv.style.display='none'; msg.textContent=''; return; }
+  const st=mapState[id]||(mapState[id]={busy:false,img:null,key:'',z:0,retryAt:0,fx:-1,fy:-1});
+  if(st.img){
+   const t=mapTile(lat,lon,st.z), key=st.z+'/'+t.x+'/'+t.y;
+   if(key===st.key){
+    // Same tile: repaint when the marker has moved by at least a pixel, or when the
+    // canvas was hidden by an invalid coordinate in between.
+    const hidden=cv.style.display!=='block';
+    if(hidden||Math.abs(t.fx-st.fx)*cv.width>=1||Math.abs(t.fy-st.fy)*cv.height>=1){ st.fx=t.fx; st.fy=t.fy; mapDraw(st,cv,t.fx,t.fy); }
+    if(hidden){ cv.style.display='block'; msg.textContent=MAP_ATTRIB+' · zoom '+st.z; }
+    return;
+   }
+  }
+  // The coordinate is on a different tile now: never leave the old site's picture and
+  // marker on screen while the new one loads or after it fails to load.
+  if(st.img){ st.img=null; st.key=''; cv.style.display='none'; }
+  if(st.busy||Date.now()<st.retryAt) return;
+  st.busy=true; msg.textContent='Loading satellite image…';
+  mapFetchBest(lat,lon).then(r=>{
+   st.busy=false;
+   if(!r){ st.retryAt=Date.now()+MAP_RETRY_MS; msg.textContent='Satellite image unavailable (needs internet on this device)'; return; }
+   st.img=r.img; st.z=r.z;
+   const t=mapTile(lat,lon,r.z); st.key=r.z+'/'+t.x+'/'+t.y; st.fx=t.fx; st.fy=t.fy;
+   cv.style.display='block'; mapDraw(st,cv,t.fx,t.fy);
+   msg.textContent=MAP_ATTRIB+' · zoom '+r.z;
+  }).catch(()=>{ st.busy=false; st.retryAt=Date.now()+MAP_RETRY_MS; });
+ }catch(e){}
+}
+
+// ── Logbook: log times and previous locations ────────────────────────────────
+// rcx_logbook.csv (read through /dl) holds one 'boot' line per session, tagged with the
+// file number in that session's file names (file_no) and written once the
+// receiver knows UTC time, with the device uptime at that moment: utc - uptime is when
+// the session booted, which is when each of its files was created. 'position' lines are
+// the saved base positions. The device only serves the file; parsing, converting to
+// local time and building file names happens here. Each read briefly pauses SD logging,
+// so the copy is reused and only re-read on request or while the current session's
+// boot line has not arrived yet (at most every 30 s).
+const sessionStart={};     // session number -> boot time, ms since epoch (UTC)
+let logbook=null, logbookAt=0, logbookReq=null;
+function fileSession(n){ const m=/_(\d+)/.exec(n); return m?String(parseInt(m[1],10)):null; }
+function parseLogbook(text){
+ const rows=[];
+ text.split(/\r?\n/).forEach(ln=>{
+  if(!ln||ln.startsWith('utc_time')) return;   // header
+  const c=ln.split(','); if(c.length<12) return;
+  rows.push({utc:c[0],s:String(parseInt(c[1],10)),up:Number(c[2]),kind:c[3],src:c[4],
+   lat:parseFloat(c[5]),lon:parseFloat(c[6]),h:parseFloat(c[7]),hacc:parseFloat(c[8]),note:c.slice(11).join(',')});
+ });
+ rows.forEach(x=>{
+  if(x.kind!=='boot') return;
+  const t=Date.parse(x.utc); if(isFinite(t)&&isFinite(x.up)) sessionStart[x.s]=t-x.up;
+ });
+ return rows;
+}
+function getLogbook(force){
+ const cur=window.curSessionStr||null;
+ const fresh=logbook&&(Date.now()-logbookAt<30000||(cur!=null&&sessionStart[cur]!=null));
+ if(!force&&fresh) return Promise.resolve(logbook);
+ if(logbookReq) return logbookReq;
+ logbookReq=(async()=>{
+  try{
+   const r=await fetch('/dl?f=rcx_logbook.csv',{cache:'no-store'});
+   if(r.status===404){ logbook=[]; logbookAt=Date.now(); return logbook; }   // no logbook on this card yet
+   if(!r.ok) return logbook;
+   logbook=parseLogbook(await r.text()); logbookAt=Date.now(); return logbook;
+  }catch(e){ return logbook; }
+  finally{ logbookReq=null; }
+ })();
+ return logbookReq;
+}
+function p2(n){ return String(n).padStart(2,'0'); }
+function stampLocal(ms){
+ const d=new Date(ms), off=-d.getTimezoneOffset(), a=Math.abs(off);
+ return d.getFullYear()+p2(d.getMonth()+1)+p2(d.getDate())+'-'+p2(d.getHours())+p2(d.getMinutes())+p2(d.getSeconds())+
+        (off<0?'-':'+')+p2(Math.floor(a/60))+p2(a%60);
+}
+function stampedName(n,ms){
+ const i=n.lastIndexOf('.'); return i>0?n.slice(0,i)+'_'+stampLocal(ms)+n.slice(i):n+'_'+stampLocal(ms);
+}
+function applyLogTimes(){
+ try{
+  document.querySelectorAll('#files a[data-f]').forEach(a=>{
+   const n=a.dataset.f, s=fileSession(n), ms=s!=null?sessionStart[s]:null;
+   const lt=document.querySelector('#files span.lt[data-f="'+n+'"]');
+   if(ms==null){ if(lt) lt.textContent=''; return; }
+   if(lt) lt.textContent=new Date(ms).toLocaleString();
+   // The save-as name travels in the URL (as=): the reply's Content-Disposition header
+   // outranks the download attribute, so the attribute alone never took effect.
+   const sn=stampedName(n,ms);
+   a.setAttribute('download',sn);
+   a.href='/dl?f='+encodeURIComponent(n)+'&as='+encodeURIComponent(sn);
+  });
+ }catch(e){}
+}
+async function annotateLogTimes(){
+ try{ await getLogbook(false); applyLogTimes(); }catch(e){}
+}
+
+// ── Previous locations ───────────────────────────────────────────────────────
+// Lists every saved position in the logbook, newest first, so the coordinates of an
+// earlier site can be selected or loaded into the manual-entry fields when the antenna
+// goes back up in the same place.
+function satMapUrl(lat,lon){
+ return 'https://www.google.com/maps/@?api=1&map_action=map&center='+lat.toFixed(9)+','+lon.toFixed(9)+'&zoom=20&basemap=satellite';
+}
+let prevRows=[];
+function renderPrev(){
+ const rows=prevRows.slice().sort((a,b)=>(b.t||0)-(a.t||0)||b.s-a.s);
+ const seen={}, out=[];
+ rows.forEach(r=>{
+  const k=r.lat.toFixed(6)+'|'+r.lon.toFixed(6)+'|'+r.h.toFixed(1);
+  if(seen[k]){ seen[k].n++; return; }
+  r.n=1; seen[k]=r; out.push(r);
+ });
+ $('prevList').innerHTML=out.map((r,i)=>
+  '<div style="padding:6px 0;border-bottom:1px dashed var(--line)">'+
+  '<div class="muted">'+(r.t?new Date(r.t).toLocaleString():('session '+r.s))+' · '+esc(r.src)+
+  (r.src==='ppp-auto'?' (UNCONVERGED)':'')+   // a survey that did not converge: possibly metres off (see posSource)
+  (isFinite(r.hacc)?(' · est. h-acc '+(r.hacc*100).toFixed(0)+' cm'):'')+(r.n>1?(' · recorded '+r.n+'×'):'')+'</div>'+
+  '<div style="user-select:all;-webkit-user-select:all;font-family:ui-monospace,monospace">'+
+  r.lat.toFixed(9)+', '+r.lon.toFixed(9)+', '+r.h.toFixed(3)+'</div>'+
+  '<div class="flex" style="margin-top:4px"><button type="button" class="btn sec" style="padding:2px 10px" onclick="usePrev('+i+')">Use</button>'+
+  '<a class="btn sec" style="padding:2px 10px" target="_blank" rel="noopener noreferrer" href="'+satMapUrl(r.lat,r.lon)+'">Satellite map</a></div>'+
+  (r.note?('<div class="muted" style="font-size:12px">'+esc(r.note)+'</div>'):'')+
+  '</div>').join('')||'';
+ window.prevShown=out;
+}
+function usePrev(i){
+ const r=(window.prevShown||[])[i]; if(!r) return;
+ $('inLat').value=r.lat.toFixed(9); $('inLon').value=r.lon.toFixed(9); $('inAlt').value=r.h.toFixed(3);
+ $('setposMsg').textContent='Loaded from logs — press Save & Apply Position to use it.';
+ $('inLat').scrollIntoView({block:'center'});
+}
+let prevBusy=false;
+async function loadPrevLocations(){
+ if(prevBusy) return; prevBusy=true; $('prevBtn').disabled=true; prevRows=[]; $('prevList').innerHTML='';
+ try{
+  $('prevMsg').textContent='Reading the logbook…';
+  const lb=await getLogbook(true);
+  if(lb==null){ $('prevMsg').textContent='Could not read the logbook.'; return; }
+  prevRows=lb.filter(x=>x.kind==='position'&&isFinite(x.lat)&&isFinite(x.lon)&&isFinite(x.h)).map(x=>{
+   const t=Date.parse(x.utc);
+   return {s:parseInt(x.s,10)||0,t:isFinite(t)?t:null,src:x.src||'?',lat:x.lat,lon:x.lon,h:x.h,hacc:x.hacc,note:x.note};
+  });
+  renderPrev();
+  $('prevMsg').textContent=prevRows.length?(prevRows.length+' saved position(s) in the logbook.'):'No saved positions in the logbook yet.';
+  applyLogTimes();
+ }catch(e){ $('prevMsg').textContent='Could not read the logbook.'; }
+ finally{ prevBusy=false; $('prevBtn').disabled=false; }
+}
 // ── Device rename ─────────────────────────────────────────────────────────────
 // The name becomes the AP's SSID, so it carries 802.11's 31-character ceiling and its
 // printable-ASCII restriction. Both are enforced on the device in setDeviceName(); they
@@ -777,7 +1091,7 @@ const DEVICE_NAME_MAX=31;
 async function renameDevice(){
  const cur=$('dev').textContent||'';
  const name=(prompt('New device name — max '+DEVICE_NAME_MAX+
-   ' characters, used for the AP SSID; takes effect after reboot:',cur)||'').trim();
+   ' characters; shown at once on this page and the LCD, used as the WiFi network name after a reboot:',cur)||'').trim();
  if(!name) return;
  if(name.length>DEVICE_NAME_MAX){
   alert('Too long: '+name.length+' characters. The AP SSID limit is '+DEVICE_NAME_MAX+'.');return;}
@@ -786,21 +1100,27 @@ async function renameDevice(){
  try{
   const r=await fetch('/api/setname',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
    body:'name='+encodeURIComponent(name)});
-  if(r.ok) alert('Saved. Reboot the device to apply the new name.');
+  if(r.ok){ $('dev').textContent=name; document.title=name; alert('Saved. The WiFi network name changes on the next reboot.'); }
   else{const t=await r.text();alert('Error: '+t);}
  }catch(e){alert('Request failed');}
 }
 // ── WiFi management ──────────────────────────────────────────────────────────
+let wifiListBusy=false, wifiListAgain=false;   // one request at a time, as for poll()
 async function loadWifiList(){
+ if(wifiListBusy){ wifiListAgain=true; return; }
+ wifiListBusy=true;
+ try{ do{ wifiListAgain=false; await loadWifiListOnce(); }while(wifiListAgain); } finally{ wifiListBusy=false; }
+}
+async function loadWifiListOnce(){
  try{
-  const r=await fetch('/api/wifilist',{cache:'no-store'});
+  const r=await fetchT('/api/wifilist',{cache:'no-store'},5000);
   const d=await r.json();
   const nets=d.networks||[];
   if(!nets.length){$('wifiList').innerHTML='<div class="muted">No networks configured</div>';return;}
   $('wifiList').innerHTML=nets.map(n=>{
    const active=n.active?'<span class="good"> ✓ connected</span>':'';
-   const del='<button class="btn sec" style="padding:2px 8px;margin-left:8px" onclick="delWifi(\''+n.ssid.replace(/'/g,"\\'")+'\')" title="Remove">✕</button>';
-   return '<div class="row" style="align-items:center"><span>'+n.ssid+active+'</span>'+del+'</div>';
+   const del='<button class="btn sec" style="padding:2px 8px;margin-left:8px" data-s="'+esc(n.ssid)+'" onclick="delWifi(this.dataset.s)" title="Remove">✕</button>';
+   return '<div class="row" style="align-items:center"><span>'+esc(n.ssid)+active+'</span>'+del+'</div>';
   }).join('');
  }catch(e){$('wifiList').innerHTML='<div class="muted">unavailable</div>';}
 }
@@ -843,12 +1163,21 @@ async function casterEnable(host,mount,en){
 // "available". Two seconds is comfortably longer than an inter-keystroke gap and short
 // enough to still feel like live feedback.
 const MOUNT_CHECK_IDLE_MS=2000;
-let mountCheckTimer=null;
+// The device refuses a check that starts within 1.5 s of the previous one ending, so a
+// check is never sent while one is running, nor less than MOUNT_CHECK_GAP_MS after it.
+const MOUNT_CHECK_GAP_MS=1600;
+let mountCheckTimer=null, mountCheckBusy=false, mountCheckEndMs=0;
 function mountCheckSoon(){
  clearTimeout(mountCheckTimer);
  const w=$('mountWarn');
  if(w){ w.className='muted'; w.textContent=''; }
- mountCheckTimer=setTimeout(mountCheck,MOUNT_CHECK_IDLE_MS);
+ mountCheckTimer=setTimeout(mountCheckWhenFree,MOUNT_CHECK_IDLE_MS);
+}
+function mountCheckWhenFree(){
+ const wait=mountCheckBusy?500:Math.max(0,mountCheckEndMs+MOUNT_CHECK_GAP_MS-Date.now());
+ if(wait>0){ clearTimeout(mountCheckTimer); mountCheckTimer=setTimeout(mountCheckWhenFree,wait); return; }
+ mountCheckBusy=true;
+ mountCheck().finally(()=>{ mountCheckBusy=false; mountCheckEndMs=Date.now(); });
 }
 async function mountCheck(){
  const w=$('mountWarn'); if(!w) return;

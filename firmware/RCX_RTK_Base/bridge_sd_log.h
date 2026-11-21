@@ -11,7 +11,16 @@
  *                      Tiny, quick writes, runs essentially forever.
  *   rtcm_NNNN.csv    — RTCM "DETAILED": one row per RTCM frame (type/len/crc/
  *                      per-caster accept status). Verbose; opt-in.
- *   rtcm_NNNN.bin    — (optional) raw capture of the exact RTCM bytes pushed.
+ *   rtcm_NNNN.bin    — (optional) raw capture of the exact RTCM bytes pushed (CRC-valid
+ *                      frames only; a frame that fails its CRC is never pushed).
+ *
+ * COORDINATE REFERENCE (one for every file): latitude and longitude are WGS84 degrees and
+ * every column says so (lat_wgs84_deg ...). Heights state their type in the name:
+ * alt_msl_m is above mean sea level as the receiver reports it (GGA), ellh_wgs84_m is above
+ * the WGS84 ellipsoid (MSL + the receiver's geoid separation, blank until one is known),
+ * and ECEF columns (ecef_wgs84_*_m) are WGS84 Earth-centred coordinates built from the
+ * ellipsoidal height (blank on the same condition). Saved base positions (logbook) are
+ * ellipsoidal, the same reference the dashboard's fixed-position entry uses.
  *
  * NNNN is a per-power-cycle session counter in NVS (no GNSS time dependency, no
  * filename collisions). Every CSV row carries a `datetime` column built from RMC
@@ -99,22 +108,20 @@
 #ifndef BRIDGE_LOG_SAT_PERIOD_MS
 #define BRIDGE_LOG_SAT_PERIOD_MS     1000    // one all-constellation sat snapshot / s
 #endif
-// Queue depth in rows (each row is a fixed ~353-byte LogLine, so 192 rows ~= 66 KiB).
-// SIZING: the sat channel emits one row PER SATELLITE per second — roughly 28 rows/s
-// against ~1/s for gps and 0.2/s for status — so production runs at ~30 rows/s. At 96
-// the queue held only ~3.3 s of production, which a root-directory scan or an SD
-// latency spike exceeds easily; the overflow appears as missing sat rows and gaps in
-// gps while status (being far slower) looks fine. 192 gives ~6.5 s of headroom.
-// Raising it further costs proportional RAM — check log_drop in the status CSV first.
+// Queue depth in rows (each row is a fixed 561-byte LogLine, so 96 rows = 53,856 B).
+// SIZING: the sat channel emits one row PER SATELLITE SIGNAL per second (roughly 90-140
+// on a multi-band fix) against ~1/s for gps and 0.2/s for status, so the queue holds a few
+// seconds of production; when it runs low, sat and RTCM-detail rows are shed first
+// (BRIDGE_LOG_LOWPRIO_RESERVE) and counted, and g_dropped is logged, so an overrun is
+// visible rather than silent.
 #ifndef BRIDGE_LOG_QUEUE_DEPTH
 // Queue depth x LogLine size is INTERNAL heap, and internal heap is the scarce pool on
 // this board — the SD driver's DMA buffers, lwIP sockets and the WiFi stack all come from
-// it, while 8 MB of PSRAM sits unused because none of them can use it. At depth 192 with
-// a 352-byte line this queue alone held ~68 kB of it, more than half of what is free
-// before WiFi starts, which is why a long session ended with sdmmc_cmd reporting
-// ESP_ERR_NO_MEM. Depth is what absorbs a Core-0 stall, so it is traded against line
-// width rather than cut alone; g_dropped is logged, so an overrun is visible rather than
-// silent.
+// it. At depth 192 with a 352-byte line this queue alone held ~68 kB of it, more than half
+// of what is free before WiFi starts, which is why a long session ended with sdmmc_cmd
+// reporting ESP_ERR_NO_MEM. Depth is what absorbs a Core-0 stall, so it is traded against
+// line width rather than cut alone. The queue stays in internal RAM by design; see
+// bridge_sdlog_init() for why it is not placed in PSRAM.
 #define BRIDGE_LOG_QUEUE_DEPTH       96
 #endif
 // Rotate every CSV tag (gps/sat/status/rtcm) and the raw .bin at this size (0 = never),
@@ -157,7 +164,12 @@ struct BridgeLogSnapshot {
     int      fixQuality;
     int      satellites;
     double   hdop;
-    double   lat, lon, altM;
+    double   lat, lon, altM;      // WGS84 latitude/longitude (deg); altM = height above mean sea level (GGA field 9)
+    // Ellipsoidal height above the WGS84 ellipsoid = altM + the receiver's geoid separation
+    // (GGA field 11). ellHKnown is false until a separation has been received: the column is
+    // then left blank rather than filled with an MSL figure that would read as ellipsoidal.
+    bool     ellHKnown;
+    double   ellHM;
     double   epeM;
     double   epe2dM;          // horizontal (2D) EPE; epeM is 3D-preferred
     double   ecefX, ecefY, ecefZ;
@@ -233,11 +245,18 @@ void bridge_sdlog_init();
 // Call from loop() — internally rate-limited; emits gps/status rows when due.
 void bridge_sdlog_tick(const BridgeLogSnapshot& snap);
 
+// Call from loop() on every pass. Does the logger's NVS work on the loop's core: the SD
+// task only raises a flag (NVS commits from the Core-0 task are not allowed). Cheap when
+// there is nothing to do.
+void bridge_sdlog_service();
+
 // Call from handleNmeaSentence() for every NMEA line — used to extract satellites
 // from GSV. Cheap and ignores non-GSV lines.
 void bridge_sdlog_feed_nmea(const char* sentence);
 
-// Call from handleValidRtcmFrame() for every CRC-valid frame (detailed/raw tiers).
+// Call for every RTCM frame (detailed/raw tiers): from handleValidRtcmFrame() for a
+// CRC-valid frame, and with crcOk=false for a frame that failed its CRC, which reaches
+// the detailed CSV only (never the raw .bin, which holds what the casters were offered).
 // `detail` is a decoded, comma-free summary of the frame contents (station ID, ECEF
 // position, sat/sig counts, etc.) for the detailed CSV — "" when nothing decoded.
 void bridge_sdlog_rtcm_frame(uint16_t type, uint16_t len, bool crcOk,
@@ -250,7 +269,38 @@ void bridge_sdlog_rtcm_frame(uint16_t type, uint16_t len, bool crcOk,
 // level: "ok" | "warn" | "fail" | "info". Commas and newlines in msg are neutralised.
 void bridge_sdlog_event(const char* level, const char* msg);
 
+// True when nm (a bare file name, no directory) is exactly a session log file name this
+// logger creates: <stem>_<digits>[_<letter>].csv with stem gps, sat, status, rtcm or event,
+// or rtcm_<digits>[_<letter>].bin; digits = session number (1-5 digits), letter a-z =
+// rotation. Anything else, including a FAT 8.3 short alias such as EVENT_~1.CSV, is not.
+// sessionOut (may be null) receives the session number.
+bool bridge_sdlog_is_log_name(const char* nm, long* sessionOut);
+
+// Name of the logbook file in the card's root directory.
+#define BRIDGE_LOGBOOK_FILE "rcx_logbook.csv"
+
+// Append one line to the card's running logbook (/rcx_logbook.csv): UTC time, file number,
+// uptime and kind are prefixed here; fields supplies the remaining columns
+// (src,lat_wgs84_deg,lon_wgs84_deg,ellh_wgs84_m,hacc_m,survey_s,fix,note: WGS84 latitude and
+// longitude, height above the WGS84 ellipsoid) with commas already removed from
+// any free text. Returns false when the card is not ready, the UTC date is not yet known
+// or the queue is full; the caller keeps the line and tries again.
+bool bridge_sdlog_logbook(const char* kind, const char* fields);
+
 uint32_t bridge_sdlog_dropped();
+// Sat / RTCM-detail rows not queued because the queue was nearly full (by design; see
+// LOW-PRIORITY SHEDDING in bridge_sd_log.cpp). Not counted in bridge_sdlog_dropped().
+uint32_t bridge_sdlog_shed();
+// Lowest free stack the SD task has had since boot, bytes (0 when logging is compiled out
+// or the task has ended because the card did not mount).
+uint32_t bridge_sdlog_stack_free();
+// True when the card could not be mounted at boot: SD logging is off for this session.
+// bridge_sdlog_ready() stays false either way; this tells "failed" from "not yet".
+bool     bridge_sdlog_failed();
+// Rows/chunks the card refused (file would not open, or a short write). 0 on a healthy card.
+uint32_t bridge_sdlog_write_failures();
+// Status rows rebuilt with caster text blanked because the full row did not fit the log line.
+uint32_t bridge_sdlog_status_trunc();
 bool     bridge_sdlog_ready();
 uint16_t bridge_sdlog_session();
 
@@ -264,3 +314,6 @@ bool bridge_sdlog_get_channel(int ch);
 // (single reader, no contention). MUST be paired: set true before streaming,
 // false in all exit paths.
 void bridge_sdlog_set_download_active(bool active);
+// After set_download_active(true): true once the task has flushed its files and is idle.
+// Callers wait for it (bounded, draining the GNSS UART) before reading the card.
+bool bridge_sdlog_pause_acked();
