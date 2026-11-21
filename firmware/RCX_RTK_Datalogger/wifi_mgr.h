@@ -102,3 +102,8 @@ const char* wifi_deviceName();
 bool wifi_setDeviceName(const char* name);
 
 const char* wifi_apIp();               // dotted-quad, valid once wifi_apBegin() ran
+
+// Called by the web server for each dashboard page or poll it serves. While a
+// device on the configuration AP is using the dashboard, the station search
+// stands aside (WIFI_AP_ACTIVITY_MS in config.h).
+void wifi_noteWebActivity();

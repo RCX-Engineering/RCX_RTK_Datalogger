@@ -43,14 +43,14 @@
 // list and corrections come straight off the base with nothing else involved —
 // useful in the field, and the only setup needed for a bench test. The base
 // accepts any mountpoint name with blank credentials, so the name below is just
-// a label. It is reachable ONLY while associated with the base's AP; on any
-// other network the address either refuses the connection or belongs to somebody
-// else's router, which fails the NTRIP handshake and is skipped like any other
-// unreachable caster.
+// a label. It is reachable ONLY while associated with the base's AP, so the
+// client tries a private-address caster like this one only when the station's
+// own address is on the same subnet (ntrip.cpp casterOnThisNetwork); on the
+// field hotspot or any other network it is passed over without a connect.
 const char* ntripCasters[][4] = {
     {"192.168.4.1","2101", "",                        ""},
     {"crtk.net",   "2101", "centipede",               "centipede"},
-    {"rtk2go.com", "2101", "you@example.com",           "none"},
+    {"rtk2go.com", "2101", "UseYourEmailHere@rcxtireblankets.com", "1234"},
 };
 const int ntripCasterCount = sizeof(ntripCasters) / sizeof(ntripCasters[0]);
 

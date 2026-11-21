@@ -25,6 +25,25 @@
  *   3. Wire the SN65HVD230 to CAN_RX_PIN/CAN_TX_PIN listed in config.h
  *   4. Remove the 120 Ohm surface-mount resistor from SN65HVD230 CAN transciever
  *
+ * Development requirements (apply to every change, by every developer or AI coding agent):
+ *   - Nothing reaches the operator until it has been proven, not merely written. Use the host
+ *     simulator, the models and the analysis tools in rover_qa/ for every change, however
+ *     small: build the scenario that reproduces the problem, watch it fail on the old code, then
+ *     watch it pass on the new. Run the whole gate (qa/qa.sh), the real ESP32-S3 toolchain
+ *     build (qa/esp32_build.sh) and the full simulator set (sim/run_all.sh), and treat a failure
+ *     as a defect in the change until it is shown to predate it.
+ *   - The operator is never the tester. He does not find bugs, does not field-test individual
+ *     fixes, and does not troubleshoot to learn what the code does. If the simulator or the
+ *     models cannot yet reproduce a behaviour, extend them or construct a new simulator until
+ *     they can, rather than shipping an unverified change and asking for a test.
+ *   - Exhaust the problem before delivering: search for every bug, edge case, race and
+ *     resource limit the change touches (RAM, stack, SD space, mutex hold times, watchdogs,
+ *     the BLE and NTRIP paths), and fix the whole class of problem, not just the symptom seen.
+ *     The standard is correct on the first try, every try.
+ *   - Delivery is one combined field test after all changes are implemented and proven.
+ *   - Fixes are surgical: no broad rewrites, protective comments kept, and any pin or GPIO
+ *     change stated explicitly (never native USB GPIO19/20).
+ *
  * Task layout:
  *   Core 1 (main): setup() + loop() — BLE TX, IMU read, display, GNSS parse
  *   Core 0:        wifiNtripTask    — WiFi, NTRIP, RaceCapture TCP server
@@ -56,6 +75,7 @@ struct LogRecord;
 #include "sd_log.h"
 #include "dbc_store.h"
 #include "webserver.h"
+#include "breadcrumb.h"
 #include <WiFi.h>
 #include <esp_heap_caps.h>   // internal-heap diagnostics (heapTrace + 30s watermark)
 #include <esp_system.h>      // esp_reset_reason() — boot cause for thermal-restart diagnosis
@@ -109,11 +129,14 @@ HardwareSerial gpsSerial(1);   // UART1
 static void displayTask(void*) {
     for (;;) {
         GnssData g_snap; ImuData m_snap; SystemStatus s_snap;
+        crumb::mark(crumb::SLOT_DISPLAY, crumb::D_SNAP);
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
             g_snap = gps; m_snap = imu; s_snap = status;
             xSemaphoreGive(dataMutex);
         }
+        crumb::mark(crumb::SLOT_DISPLAY, crumb::D_DRAW);
         display_update(g_snap, m_snap, s_snap);   // internally rate-limited to 5 Hz
+        crumb::mark(crumb::SLOT_DISPLAY, crumb::D_IDLE);
         vTaskDelay(pdMS_TO_TICKS(50));            // poll at 20 Hz; redraw gate is inside
     }
 }
@@ -135,6 +158,7 @@ static void heapTrace(const char* step) {
 // ── WiFi/NTRIP/RaceCapture task (Core 0) ─────────────────────────────────────
 static void wifiNtripTask(void*) {
     heapTrace("task start");
+    crumb::mark(crumb::SLOT_NET, crumb::N_NTRIP);
     ntrip_init();
     heapTrace("ntrip_init");
 
@@ -143,6 +167,7 @@ static void wifiNtripTask(void*) {
     // the ordering note in setup()). The AP is the only route to the dashboard
     // on a unit with no stored networks, and it stays up for as long as the
     // station search is still running.
+    crumb::mark(crumb::SLOT_NET, crumb::N_WIFI);
     wifi_apBegin();
     heapTrace("wifi_apBegin");
 
@@ -174,7 +199,9 @@ static void wifiNtripTask(void*) {
     for (;;) {
         // Track the AP against station state: up while disconnected, down once a
         // station link has held (see wifi_apService).
+        crumb::mark(crumb::SLOT_NET, crumb::N_AP);
         wifi_apService();
+        crumb::mark(crumb::SLOT_NET, crumb::N_WIFI);
 
         // ── WiFi watchdog ─────────────────────────────────────────────────
         if (WiFi.status() != WL_CONNECTED) {
@@ -187,7 +214,7 @@ static void wifiNtripTask(void*) {
                     status.rcConnected    = false;
                     xSemaphoreGive(dataMutex);
                 }
-                ntrip_onWifiLost();   // soft: keep mountpoint, prompt retry on return
+                ntrip_onWifiLost();   // soft: keep the mountpoint; caster timers keep running; the internet gate re-arms
             }
 
             // wifi_service() owns all reconnect policy and timing: the loyalty
@@ -196,12 +223,14 @@ static void wifiNtripTask(void*) {
             // sweeps. It is a cheap no-op when there is nothing to attempt, so
             // it is safe to call on every pass of this loop.
             if (wifi_service()) {
+                ntrip_onWifiUp();
                 wifiWasUp = true;     // up-edge after a drop
 #if defined(RACECAPTURE_ENABLE) && RACECAPTURE_ENABLE
                 racecapture_beginServer();
 #endif
             }
         } else {
+            if (!wifiWasUp) ntrip_onWifiUp();   // link (re)established
             wifiWasUp = true;
         }
 
@@ -215,6 +244,7 @@ static void wifiNtripTask(void*) {
             // consumer tolerates that far better than fabricated data.
             GnssData g_snap; ImuData m_snap; CanData c_snap;
             bool snapOk = false;
+            crumb::mark(crumb::SLOT_NET, crumb::N_SNAP);
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
                 g_snap = gps; m_snap = imu; c_snap = can;
                 xSemaphoreGive(dataMutex);
@@ -222,14 +252,17 @@ static void wifiNtripTask(void*) {
             }
 
             if (snapOk) {
+                crumb::mark(crumb::SLOT_NET, crumb::N_NTRIP);
                 ntrip_loop(gpsSerial, g_snap);
 
 #if defined(RACECAPTURE_ENABLE) && RACECAPTURE_ENABLE
+                crumb::mark(crumb::SLOT_NET, crumb::N_RC);
                 racecapture_loop(g_snap, m_snap, c_snap);
 #endif
             }
         }
 
+        crumb::mark(crumb::SLOT_NET, crumb::N_IDLE);
         delay(10);
     }
 }
@@ -306,6 +339,9 @@ void setup() {
         strncpy(g_resetReasonStr, s, sizeof(g_resetReasonStr) - 1);
         g_resetReasonStr[sizeof(g_resetReasonStr) - 1] = '\0';
         Serial.printf("↻ Reset reason: %s (code %d)\n", g_resetReasonStr, (int)rr);
+        // Where each task was when the previous run ended; see breadcrumb.h. Must run before any
+        // task is created, since it re-arms the record the tasks write into.
+        crumb::begin(rr, g_resetReasonStr);
     }
 
     dataMutex = xSemaphoreCreateMutex();
@@ -369,16 +405,14 @@ void setup() {
     heapTrace("webserver");
 #endif
 
-    // WiFi/NTRIP/RaceCapture task. Stack was 28 KB, sized defensively for the
-    // String-heavy source-table parse; that parse is now zero-heap/zero-String,
-    // and the measured high-water mark showed <3 KB of 28 KB actually used.
-    // Task stacks MUST live in internal SRAM (cannot go to PSRAM), and internal
-    // RAM is our scarcest resource — 12 KB still leaves >9 KB of headroom over
-    // the worst observed usage. Watch the WiFiNTRIP watermark in the 30 s diag
-    // print; if it ever drops below ~2000, raise this again.
+    // WiFi/NTRIP/RaceCapture task. The source-table parse is zero-heap and zero-String, and the
+    // 30 s diagnostic's high-water mark across long runs, scans included, shows about 3.9 KB of stack
+    // used. Task stacks live in internal SRAM, the scarcest resource on this board, so 8 KB keeps
+    // more than twice the measured peak in reserve. Watch the WiFiNTRIP watermark in the 30 s print;
+    // if it ever drops below ~2000, raise this again.
     xTaskCreatePinnedToCore(
         wifiNtripTask, "WiFiNTRIP",
-        12288, nullptr, 1, nullptr, 0);
+        8192, nullptr, 1, nullptr, 0);
     heapTrace("wifintrip task");
 
     // Display task on Core 0 — keeps slow SPI redraws off the GNSS/BLE path.
@@ -471,9 +505,10 @@ static void report() {
 }
 }  // namespace loopPhase
 
-// Time one statement into a phase slot.
+// Time one statement into a phase slot (and leave a breadcrumb for it; see breadcrumb.h).
 #define LOOP_PHASE(slot, stmt)                                   \
     do {                                                         \
+        crumb::mark(crumb::SLOT_LOOP, crumb::L_##slot);               \
         uint32_t _phaseT0 = micros();                            \
         stmt;                                                    \
         loopPhase::note(loopPhase::slot, micros() - _phaseT0);   \
@@ -486,22 +521,36 @@ void loop() {
     // ── GNSS: parse UART bytes, update gps struct ─────────────────────────
     LOOP_PHASE(GNSS, gnss_loop(gpsSerial));
 
-    // ── IMU: read at 50 Hz into a local, then publish under mutex ─────────
+    // ── IMU: polled at 250 Hz while the car is active, 50 Hz otherwise ─────
+    // Every sample is a row in the IMU log and drives the decoded-CAN row cadence. The shared
+    // snapshot (BLE, display, status) is published at 20 Hz (IMU_PUBLISH_MS): the BLE stream and
+    // the display run no faster, and faster publication would only add dataMutex traffic.
+    // A calibration capture always reads at 50 Hz.
     {
-        static uint32_t lastImu = 0;
-        if (millis() - lastImu >= 20) {
+        static uint32_t lastImu = 0, lastImuPublish = 0;
+        // Read at the active rate even while parked (only the rows written are thinned), so the first
+        // sample of motion is seen within one sample period; a calibration capture reads at 50 Hz.
+        const bool activeRate = imu_calibrationState() != IMU_CAL_RUNNING;
+        if (millis() - lastImu >= (activeRate ? IMU_POLL_ACTIVE_MS : IMU_POLL_IDLE_MS)) {
             lastImu = millis();
-            imu_pollSerial();                        // "imucal" → start calibration (no-op otherwise)
-            imu_serviceCalRequests();                // web /imu/cal → start/clear, same context as imu_read()
+            const bool publish = (millis() - lastImuPublish) >= IMU_PUBLISH_MS;
+            if (publish) {
+                imu_pollSerial();                    // "imucal" → start calibration (no-op otherwise)
+                imu_serviceCalRequests();            // web /imu/cal → start/clear, same context as imu_read()
+            }
             ImuData m_local;
             LOOP_PHASE(IMU, imu_read(m_local));      // blocking I2C — done WITHOUT the mutex
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
-                imu = m_local;                        // publish atomically
-                xSemaphoreGive(dataMutex);
+            if (publish) {
+                crumb::mark(crumb::SLOT_LOOP, crumb::L_IMU_PUB);
+                lastImuPublish = millis();
+                if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
+                    imu = m_local;                    // publish atomically
+                    xSemaphoreGive(dataMutex);
+                }
             }
-            // Push IMU record at 50 Hz to its own SD log channel
             sdlog_push_imu(m_local.ax, m_local.ay, m_local.az,
                            m_local.gx, m_local.gy, m_local.gz);
+            sdlog_push_can();                        // decoded CAN channel, self-paced
         }
     }
 
@@ -514,6 +563,7 @@ void loop() {
         static uint32_t lastTemp = 0;
         if (millis() - lastTemp >= 2000) {
             lastTemp = millis();
+            crumb::mark(crumb::SLOT_LOOP, crumb::L_TEMP);
             uint32_t tempT0 = micros();
             float espC = dieTempReadWideC();         // ESP32-S3 silicon die, °C
             thermal_update(espC);                    // see thermal.h — LCD/SD throttling only
@@ -545,6 +595,7 @@ void loop() {
         //    tick() does BLE notify()s with vTaskDelays, so it must run OUTSIDE
         //    the critical section. Snapshot in, tick out.
         static GnssData g_snap; static ImuData m_snap; static CanData c_snap;
+        crumb::mark(crumb::SLOT_LOOP, crumb::L_BLE_SNAP);
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
             g_snap = gps; m_snap = imu; c_snap = can;
             xSemaphoreGive(dataMutex);
@@ -596,6 +647,7 @@ void loop() {
     // phase above shows up as the difference. Reported on its own 5 s cadence so
     // the numbers stay readable next to the existing wire counters.
     loopPhase::note(loopPhase::WHOLE, micros() - loopT0);
+    crumb::mark(crumb::SLOT_LOOP, crumb::L_DIAG);
     {
         static uint32_t lastPhaseReport = 0;
         if (millis() - lastPhaseReport >= 5000) {
@@ -624,13 +676,15 @@ void loop() {
                 (unsigned)g_minFreeInternal, (unsigned)g_minLargestBlock);
             Serial.printf("   ⬇ DMA-capable lows since boot:  free=%u B, largest block=%u B\n",
                 (unsigned)g_minFreeDma, (unsigned)g_minLargestDma);
-            Serial.printf("   Display=%u CAN=%u SDLog=%u\n",
+            Serial.printf("   Display=%u CAN=%u SDLog=%u async_tcp=%u\n",
                 (unsigned)uxTaskGetStackHighWaterMark(
                     xTaskGetHandle("Display")),
                 (unsigned)uxTaskGetStackHighWaterMark(
                     xTaskGetHandle("CAN")),
                 (unsigned)uxTaskGetStackHighWaterMark(
-                    xTaskGetHandle("SDLog")));
+                    xTaskGetHandle("SDLog")),
+                (unsigned)uxTaskGetStackHighWaterMark(
+                    xTaskGetHandle("async_tcp")));
         }
     }
 #endif

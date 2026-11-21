@@ -18,7 +18,9 @@
 #include "config.h"
 #include "dbc_store.h"
 #include "sd_log.h"
+#include "breadcrumb.h"
 #include "dbc_parse.h"
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 static const char* NVS_NS = "rcx_dbc";
 
@@ -280,6 +282,7 @@ void dbcTask(void*) {
 
     for (;;) {
         if (s_commitReq || s_deleteReq || s_scanReq) {
+            crumb::mark(crumb::SLOT_DBC, crumb::B_WORK);
             SemaphoreHandle_t mtx = sdlog_getMutex();
             if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(2000)) == pdTRUE) {
                 if (s_commitReq) { doCommit(); s_commitReq = false; }
@@ -297,6 +300,7 @@ void dbcTask(void*) {
                 if (mtx) xSemaphoreGive(mtx);
             }
         }
+        crumb::mark(crumb::SLOT_DBC, crumb::B_IDLE);
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -311,5 +315,7 @@ void dbc_init() {
     }
     Serial.printf("🗂️  DBC store: active file %s\n", s_active[0] ? s_active : "(none)");
 
-    xTaskCreatePinnedToCore(dbcTask, "dbcTask", 4096, nullptr, 1, nullptr, 0);
+    // 5 KB. The calculated worst case is 3,724 B (qa/memmodel.py section 6), which is
+    // 91% of 4 KB; 5 KB keeps the task under the 80% stack-margin gate.
+    xTaskCreatePinnedToCore(dbcTask, "dbcTask", 5120, nullptr, 1, nullptr, 0);
 }

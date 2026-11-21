@@ -14,6 +14,7 @@
 #include "thermal.h"
 #include "ble_racecapture.h"   // ble_linkState/ble_txDelivered/ble_txSuperseded — BLE health columns          // thermal_*() — LCD/SD throttling gates, see thermal.h
 #include "can_porsche718_extra.h"
+#include "display.h"            // display_coneModeActive() — full-rate IMU during cone surveys
 #include <SD_MMC.h>
 #ifndef BOARD_MAX_SDMMC_FREQ          // normally from the board variant; fall back to
 #define BOARD_MAX_SDMMC_FREQ SDMMC_FREQ_DEFAULT   // the SD default clock (20 MHz)
@@ -23,10 +24,13 @@
 #include <time.h>
 #include <sys/time.h>        // settimeofday() — sets the system clock from GPS
 #include <esp_heap_caps.h>   // heap_caps_malloc(MALLOC_CAP_SPIRAM) for queue storage
+#include "breadcrumb.h"
+#include "debug_log.h"      // LAST include: routes this file's Serial output through the SD mirror and
+                            // declares DebugLog::drainToFile()/closeFile(), called from sdLogTask
 
 #if defined(SD_LOG_ENABLE) && SD_LOG_ENABLE
 
-// ── Shared GPS + CAN record (pushed from loop at 20 Hz) ──────────────────────
+// ── Log record: the GPS epoch row (loop, 20 Hz) and the decoded CAN snapshot (50 Hz active) ──
 struct LogRecord {
     uint32_t ms;
     bool     valid;
@@ -77,21 +81,56 @@ struct LogRecord {
     // columns. gsaSats contains no commas by construction (handleGNGSA).
     float    pdop, hdop, vdop;
     char     gsaSats[128];
+    // Velocity provenance (gnss.cpp "Velocity selection"), appended last.
+    // speed_mph/heading_deg above carry the PUBLISHED values (blank when invalid);
+    // vel_src says where they came from; trk_* are the RTK-track values every
+    // epoch, so one field session can validate the track against the receiver's
+    // own fresh velocity and against CAN.
+    uint8_t  velSrc;
+    float    trkSpeedMph, trkHeadingDeg;
 };
 
 // ── Queues ────────────────────────────────────────────────────────────────────
-static QueueHandle_t     logQueue   = nullptr;  // GPS+CAN  20 Hz
-static QueueHandle_t     imuQueue   = nullptr;  // IMU      50 Hz
+static QueueHandle_t     logQueue   = nullptr;  // GPS epoch record (20 Hz)
+static QueueHandle_t     imuQueue   = nullptr;  // IMU      250 Hz active / 1 Hz parked
 static QueueHandle_t     satQueue   = nullptr;  // SAT GSV  1 Hz
+static QueueHandle_t     nmeaQueue  = nullptr;  // raw GGA+RMC 40 lines/s (debug channel)
 static QueueHandle_t     canRawQueue = nullptr; // CAN raw sniffer frames (bursty)
+static QueueHandle_t     canQueue    = nullptr; // decoded CAN channel snapshots (own cadence)
 static volatile uint32_t canRawDrops = 0;       // frames dropped (queue full)
+static volatile uint32_t gpsRowDrops = 0;       // GPS epochs refused by a full epoch queue
 static bool              gClockSet   = false;   // system clock set from GPS yet?
-// Offset that converts a record's millis() timestamp to absolute unix milliseconds:
-//   unix_ms = record.ms + gUnixMsOffset
-// Captured once when the clock is set, pairing the GPS sample's UTC against that
-// same sample's millis() so all log timestamps share one monotonic absolute base.
+// Offset that converts a record's millis() timestamp to absolute unix milliseconds
+// (unix_ms = record.ms + gUnixMsOffset, until the first millis() wrap). Captured
+// once when the clock is set, pairing the GPS sample's UTC against that same
+// sample's millis(); published in the canraw #UTC_SYNC marker. Rows themselves are
+// converted by toUnixMs() below, which stays exact across the wrap.
 static int64_t           gUnixMsOffset = 0;
-static inline uint64_t toUnixMs(uint32_t ms) { return (uint64_t)((int64_t)ms + gUnixMsOffset); }
+// millis() is 32-bit and wraps every 49.7 days; a fixed offset added to it
+// steps unix_ms back by 2^32 ms at the wrap while utc_time carries on. So
+// conversion is relative to an anchor (a millis value and its unix time) using
+// the SIGNED 32-bit difference, which is exact across the wrap, and the anchor
+// is walked forward whenever a row is more than ~12 days past it, keeping every
+// difference far inside int32 range for a session of any length. Single caller
+// context (sdLogTask), so the anchor needs no lock. Before the clock is set the
+// offset is 0 and rows carry raw millis, as the #UTC_SYNC marker documents.
+static uint32_t gAnchorMs     = 0;
+static int64_t  gAnchorUnixMs = 0;
+static inline uint64_t toUnixMs(uint32_t ms) {
+    if (!gClockSet) return (uint64_t)((int64_t)ms + gUnixMsOffset);
+    int32_t d = (int32_t)(ms - gAnchorMs);
+    if (d > 0x40000000) { gAnchorMs += (uint32_t)d; gAnchorUnixMs += d; d = 0; }
+    return (uint64_t)(gAnchorUnixMs + d);
+}
+
+// UTC text for a row stamped only with unix milliseconds (the decoded CAN rows).
+static void fmtUtcMs(uint64_t ums, char* out, size_t n) {
+    time_t sec = (time_t)(ums / 1000);
+    struct tm t; gmtime_r(&sec, &t);
+    snprintf(out, n, "%04u-%02u-%02uT%02u:%02u:%02u.%03u", (unsigned)(t.tm_year + 1900) % 10000u,
+             (unsigned)(t.tm_mon + 1) % 100u, (unsigned)t.tm_mday % 100u, (unsigned)t.tm_hour % 100u,
+             (unsigned)t.tm_min % 100u, (unsigned)t.tm_sec % 100u, (unsigned)(ums % 1000));
+}
 
 // Raw CAN frame record for sniffer logging (16 bytes → cheap to queue in PSRAM).
 struct CanRawRecord { uint32_t ms; uint16_t id; uint8_t dlc; uint8_t data[8]; };
@@ -104,14 +143,20 @@ void sdlog_push_can_raw(uint32_t ms, uint16_t id, uint8_t dlc, const uint8_t* da
     if (xQueueSendToBack(canRawQueue, &r, 0) != pdTRUE) canRawDrops++;
 }
 uint32_t sdlog_getCanRawDrops() { return canRawDrops; }
+
 static volatile bool     sdReady    = false;
 static SemaphoreHandle_t sdMutex    = nullptr;
+// Session stamp as seen by other modules (debug_log names its file from it). sdLogTask owns the
+// working copy; it publishes here once per pass. Reads from other tasks may see a stale or
+// mid-copy name at worst for one pass, which only delays the debug file's open or rename.
+static char              pubStamp[24] = "";
 static char              activeLogName[LOG_NAME_MAX] = "";
 static volatile uint32_t logFileCount      = 0;
+static volatile uint32_t sdWriteFaults     = 0;   // see failChannel in sdLogTask
 // Live on-disk size of each open log, for the display + web listing. Indexed by
 // the setActive() type: 0=gps 1=can 2=imu 3=sat. Reflects flushed bytes (steps
 // each flush) — the true size on the card. Published by sdLogTask every ~250 ms.
-static volatile uint32_t activeBytesByType[4] = {0, 0, 0, 0};
+static volatile uint32_t activeBytesByType[5] = {0, 0, 0, 0, 0};
 
 // ── Active-files RAM snapshot (for the default /files view) ───────────────────
 // The web /files route used to enumerate the ENTIRE SD root under sdMutex —
@@ -122,13 +167,23 @@ static volatile uint32_t activeBytesByType[4] = {0, 0, 0, 0};
 // ZERO times, so routine refreshes never contend for sdMutex. The "last 5" and
 // "all" stages do an on-demand scan (user-initiated, infrequent).
 //   Types: 0=gps 1=can 2=imu 3=sat — matches the four log streams.
-static char         activeByType[4][LOG_NAME_MAX] = {{0}};
+static char         activeByType[5][LOG_NAME_MAX] = {{0}};   // + 4 = nmea (debug)
 // The CAN raw sniffer dump is held open by sdLogTask while the sniffer is on, but
 // it is NOT one of the four typed channels above — so it must be tracked here too,
 // or a web delete would try to SD_MMC.remove() it while open (FatFs corruption +
 // device reset). Stored WITHOUT a leading slash to match activeByType / the dir
 // snapshot naming. Written/read only under activeMux.
 static char         canRawName[LOG_NAME_MAX]      = {0};
+
+// Raw CAN hold. While held, the raw log file stays closed and its staging buffer is released; frames keep
+// queueing in PSRAM (about ten seconds' worth) and are written to a new raw file when the hold ends.
+// The NTRIP source-table scan uses this to free internal RAM while RTK is down.
+static volatile bool sRawHold = false;
+void sdlog_rawHold(bool hold) { sRawHold = hold; }
+bool sdlog_rawIsOpen() { return canRawName[0] != '\0'; }
+// The serial-mirror file (debug_log.cpp) is held open the same way and needs the same protection.
+static char         debugFileName[LOG_NAME_MAX]   = {0};
+static volatile uint32_t debugFileBytes = 0;   // live size of the open mirror file, for the open-file view
 static portMUX_TYPE activeMux           = portMUX_INITIALIZER_UNLOCKED;
 
 // ── Directory snapshot — for the web "Last 12" / "Show all" views ─────────────
@@ -196,6 +251,7 @@ static bool           dirScanActive = false;
 // the web serves the cached values with NO SD access.
 static volatile uint64_t capTotal = 0, capUsed = 0;
 static uint32_t          capLastMs = 0;
+static volatile bool     capRefreshReq = false;   // a delete freed space: refresh now, not in 30 s
 
 // ── Download priority ─────────────────────────────────────────────────────
 // Count of file transfers currently in flight (web layer only — see sd_log.h
@@ -204,11 +260,12 @@ static uint32_t          capLastMs = 0;
 static volatile int downloadActive = 0;
 void sdlog_downloadBegin() { downloadActive++; }
 void sdlog_downloadEnd()   { if (downloadActive > 0) downloadActive--; }
+bool sdlog_downloadInProgress() { return downloadActive != 0; }
 
 // Publish/clear the active name for one stream. Single writer (sdLogTask), so we
 // can compare unlocked and only take the (tiny) critical section when it changes.
 static void setActive(int type, const char* name) {
-    if (type < 0 || type > 3) return;
+    if (type < 0 || type > 4) return;
     const char* v = name ? ((name[0] == '/') ? name + 1 : name) : "";
     if (strncmp(activeByType[type], v, 32) == 0) return;   // unchanged → no lock
     taskENTER_CRITICAL(&activeMux);
@@ -225,6 +282,7 @@ static volatile bool logGps = true;
 static volatile bool logImu = true;
 static volatile bool logCan = false;
 static volatile bool logSat = false;
+static volatile bool logNmea = false;   // raw receiver capture (debug) — see sd_log.h
 
 // ── Master pause ──────────────────────────────────────────────────────────────
 // Pause forces every effective flag false and restores the operator's set on
@@ -237,7 +295,7 @@ static volatile bool logSat = false;
 // RAM only, never NVS: a unit must always come back logging after a power cycle,
 // never silently stay paused because of how it was left days earlier.
 static volatile bool logPaused = false;
-static bool wantGps = true, wantImu = true, wantCan = false, wantSat = false;
+static bool wantGps = true, wantImu = true, wantCan = false, wantSat = false, wantNmea = false;
 
 static void loadLogConfig() {
     Preferences p; p.begin("rcx_log", true);
@@ -245,9 +303,10 @@ static void loadLogConfig() {
     logImu = p.getBool("imu", true);
     logCan = p.getBool("can", false);
     logSat = p.getBool("sat", false);
+    logNmea = p.getBool("nmea", false);
     p.end();
     // Boot is never paused, so the intended set and the effective set agree here.
-    wantGps = logGps; wantImu = logImu; wantCan = logCan; wantSat = logSat;
+    wantGps = logGps; wantImu = logImu; wantCan = logCan; wantSat = logSat; wantNmea = logNmea;
 }
 // Persists the INTENDED set (wantX), never the effective flags: while paused the
 // effective flags are all false, and writing those would turn a pause into a
@@ -258,6 +317,7 @@ static void saveLogConfig() {
     p.putBool("imu", wantImu);
     p.putBool("can", wantCan);
     p.putBool("sat", wantSat);
+    p.putBool("nmea", wantNmea);
     p.end();
 }
 
@@ -305,8 +365,11 @@ void sdlog_push_if_new() {
     rec.valid    = gps.valid;
     rec.lat      = gps.latitude;  rec.lon      = gps.longitude;
     rec.altMSL   = gps.altMSL;   rec.geoidSepM= gps.geoidSepM;
-    rec.speedMph = (float)(gps.speedKnots * 1.15078);
-    rec.headingDeg = (float)gps.headingDeg;
+    rec.speedMph   = gps.speedValid   ? (float)(gps.speedKnots * 1.15078) : NAN;
+    rec.headingDeg = gps.headingValid ? (float)gps.headingDeg : NAN;
+    rec.velSrc        = gps.velSrc;
+    rec.trkSpeedMph   = isnan(gps.trkSpeedMps) ? NAN : gps.trkSpeedMps * 2.236936f;
+    rec.trkHeadingDeg = gps.trkHeadingDeg;
     { uint32_t age = gps.velUpdateMillis ? (millis() - gps.velUpdateMillis) : 65535u;
       rec.spdAgeMs = (uint16_t)(age > 65535u ? 65535u : age); }
     rec.pdop = gps.pdop; rec.hdop = gps.hdop; rec.vdop = gps.vdop;
@@ -382,52 +445,241 @@ void sdlog_push_if_new() {
     rec.tpmsTempRearLeftC      = rec.is718 ? x718.tpmsTempRearLeftC : NAN;
     rec.tpmsTempRearRightC     = rec.is718 ? x718.tpmsTempRearRightC : NAN;
 
-    xQueueSendToBack(logQueue, &rec, 0);
+    // A refused epoch is a GPS row that will never reach the card. Counted and reported (at most
+    // every 10 s) with the other queues' depths, which show whether the writer is behind overall.
+    if (xQueueSendToBack(logQueue, &rec, 0) != pdTRUE) {
+        gpsRowDrops = gpsRowDrops + 1;   // one writer (the loop task)
+        static uint32_t lastWarnMs = 0;
+        if (millis() - lastWarnMs >= 10000) {
+            lastWarnMs = millis();
+            Serial.printf("⚠️  SD: GPS epoch queue full — %lu epochs not logged so far (raw CAN queue %u, IMU queue %u waiting)\n",
+                          (unsigned long)gpsRowDrops,
+                          canRawQueue ? (unsigned)uxQueueMessagesWaiting(canRawQueue) : 0u,
+                          imuQueue ? (unsigned)uxQueueMessagesWaiting(imuQueue) : 0u);
+        }
+    }
+}
+uint32_t sdlog_getGpsRowDrops() { return gpsRowDrops; }
+
+// ── Car activity (drives the IMU poll rate and the IMU / decoded-CAN row rates) ──
+// "Active" = moving or recently moving. Speed above IMU_ACTIVE_SPEED_MPS (RTK-track speed or CAN
+// vehicle speed) or any accel / gyro deviation keeps the car active; it becomes motionless only
+// after IMU_MOTIONLESS_DWELL_MS of none of those.
+//
+// The receiver's own speed field is deliberately not one of the inputs here. That is a
+// workaround, not a judgement of the receiver: with a healthy RTK solution its Doppler speed and
+// heading are among the most accurate data the system has, better than its position. They were
+// dropped from this decision because the receiver's speed and heading stall (see the stalled
+// speed/heading notes in gnss.cpp), and a stalled value would hold the car "active" or "still"
+// wrongly. The root cause is not yet fixed. Once a firmware fix makes the receiver's speed and
+// heading dependably live, add them back as a speed input alongside the two above. Speed
+// is what keeps a smooth straight run, which the accel/gyro thresholds alone would call still,
+// at full rate. The float reads are lock-free: an aligned 32-bit read cannot tear, and one
+// stale sample only shifts the rate change by a pass.
+static volatile bool gCarActive = true;
+bool sdlog_carActive() { return gCarActive; }
+
+static bool psramRoomy();   // defined with the queue helpers below
+static void updateCarActivity(float ax, float ay, float az, float gx, float gy, float gz) {
+    static uint32_t stillSinceMs = 0;
+    static bool     wasStill     = false;
+    // Stillness is judged against a slow running average of the sensor's own output, not against
+    // an ideal 1 g / 0 dps: a unit whose accelerometer scale reads 3 % low, or whose gyro carries a
+    // bias of a couple of dps, is perfectly still yet sits permanently outside absolute thresholds.
+    static uint32_t refMs   = 0;
+    static float    refMag  = 1.0f, refGx = 0.0f, refGy = 0.0f, refGz = 0.0f;
+    const uint32_t  nowMs   = millis();
+    const float     mag     = sqrtf(ax * ax + ay * ay + az * az);
+    if (refMs == 0) { refMag = mag; refGx = gx; refGy = gy; refGz = gz; }
+    else {
+        const float dt = (float)(nowMs - refMs);
+        const float a  = dt / ((float)IMU_MOTIONLESS_REF_TAU_MS + dt);
+        refMag += a * (mag - refMag);
+        refGx  += a * (gx - refGx);  refGy += a * (gy - refGy);  refGz += a * (gz - refGz);
+    }
+    refMs = nowMs | 1;   // never 0 (0 = not yet seeded)
+    const float accelDevG = fabsf(mag - refMag);
+    const float gyroDps   = sqrtf((gx - refGx) * (gx - refGx) + (gy - refGy) * (gy - refGy) + (gz - refGz) * (gz - refGz));
+    const float trk = gps.trkSpeedMps, cv = can.vehicleSpeedKph;
+    const bool  fastEnough = (!isnan(trk) && trk > IMU_ACTIVE_SPEED_MPS) ||
+                             (!isnan(cv)  && cv  > IMU_ACTIVE_SPEED_MPS * 3.6f);
+    const bool  still = accelDevG < IMU_MOTIONLESS_ACCEL_G && gyroDps < IMU_MOTIONLESS_GYRO_DPS && !fastEnough;
+    const uint32_t now = millis();
+    if (still && !wasStill) stillSinceMs = now;   // just went still: start the dwell clock
+    wasStill = still;
+    gCarActive = !(still && !display_coneModeActive() && (now - stillSinceMs) >= IMU_MOTIONLESS_DWELL_MS);
 }
 
 // ── sdlog_push_imu ────────────────────────────────────────────────────────────
 // Rate reduction lives HERE, at the producer side, specifically because this is
 // the one call in the whole IMU path that only feeds SD logging — the BLE
 // stream reads its own snapshot upstream of this function and never sees
-// these skips, null or not. See config.h for the thresholds/timings.
+// these skips, null or not. See config.h for the thresholds/timings. Called once per IMU
+// sample (IMU_POLL_ACTIVE_MS apart while the car is active), and every sample becomes a row.
 void sdlog_push_imu(float ax, float ay, float az, float gx, float gy, float gz) {
+    updateCarActivity(ax, ay, az, gx, gy, gz);   // also steers the decoded-CAN rate when IMU logging is off
     if (!imuQueue || !logImu) return;
     if (thermal_satCanImuInhibit()) return;   // ≥112°C: SD logging paused (see thermal.h)
 
-    // "Motionless" = both accel deviation from 1 g and gyro magnitude have sat
-    // below threshold continuously for IMU_MOTIONLESS_DWELL_MS. stillSinceMs
-    // resets on every sample that breaks either threshold, so a return to
-    // motion clears the state and full-rate logging resumes on the very next
-    // sample — only the transition INTO reduced-rate logging is debounced.
-    static uint32_t stillSinceMs = 0;
-    static bool     wasStill     = false;
-    float accelDevG = fabsf(sqrtf(ax * ax + ay * ay + az * az) - 1.0f);
-    float gyroDps   = sqrtf(gx * gx + gy * gy + gz * gz);
-    bool  still = accelDevG < IMU_MOTIONLESS_ACCEL_G && gyroDps < IMU_MOTIONLESS_GYRO_DPS;
-    uint32_t now = millis();
-    if (still && !wasStill) stillSinceMs = now;   // just went still: start the dwell clock
-    wasStill = still;
-    bool motionless = still && (now - stillSinceMs) >= IMU_MOTIONLESS_DWELL_MS;
+    // A return to motion clears the reduced rate on the very next sample; only the transition
+    // INTO reduced-rate logging is debounced (the dwell in updateCarActivity). While reduced, the
+    // last IMU_PREROLL_MS of samples are kept; when the car wakes they are written ahead of the
+    // first full-rate row, so the onset of a launch is in the log at the full sample rate.
+    static ImuLogRecord preRoll[IMU_PREROLL_MS / IMU_POLL_ACTIVE_MS + 1];
+    static uint16_t     preHead = 0, preCount = 0;
+    static bool         wasReduced = false;
+    static uint32_t     lastImuWriteMs = 0;
+    const uint32_t now = millis();
+    const ImuLogRecord r = {now, ax, ay, az, gx, gy, gz};
+    constexpr uint16_t kPre = sizeof(preRoll) / sizeof(preRoll[0]);
 
-    static uint32_t lastImuWriteMs = 0;
-    if (motionless && lastImuWriteMs != 0 && (now - lastImuWriteMs) < IMU_MOTIONLESS_LOG_MS)
+    if (!gCarActive) {
+        preRoll[preHead] = r; preHead = (preHead + 1) % kPre; if (preCount < kPre) preCount++;
+        wasReduced = true;
+        if (lastImuWriteMs != 0 && (now - lastImuWriteMs) < IMU_MOTIONLESS_LOG_MS) return;
+        lastImuWriteMs = now;
+        xQueueSendToBack(imuQueue, &r, 0);
         return;
+    }
+    if (wasReduced) {
+        wasReduced = false;
+        const uint16_t first = (preHead + kPre - preCount) % kPre;   // oldest kept sample
+        for (uint16_t i = 0; i < preCount; i++) {
+            const ImuLogRecord& p = preRoll[(first + i) % kPre];
+            if (p.ms > lastImuWriteMs) xQueueSendToBack(imuQueue, &p, 0);   // the sample already written is not repeated
+        }
+        preCount = 0; preHead = 0;
+    }
     lastImuWriteMs = now;
-
-    ImuLogRecord r = {millis(), ax, ay, az, gx, gy, gz};
     xQueueSendToBack(imuQueue, &r, 0);
 }
 
+// ── sdlog_push_can ────────────────────────────────────────────────────────────
+// Decoded CAN channel snapshot: every CAN_LOG_ACTIVE_MS while the car is active, every
+// CAN_LOG_MOTIONLESS_MS once it has been motionless. Driven from the IMU poll (loop(), core 1).
+void sdlog_push_can() {
+    if (!canQueue || !logCan) return;
+    if (thermal_satCanImuInhibit()) return;   // ≥112°C: SD logging paused (see thermal.h)
+    static uint32_t lastPushMs = 0, lastRingMs = 0;
+    // Pre-roll: while reduced-rate, a snapshot is taken at the active cadence into a small ring
+    // (PSRAM) and only one per CAN_LOG_MOTIONLESS_MS goes to the queue; when the car wakes the
+    // ring is written first. Without PSRAM room there is simply no pre-roll.
+    constexpr uint16_t kPre = 16;                 // 16 x CAN_LOG_ACTIVE_MS covers IMU_PREROLL_MS
+    static_assert(kPre * CAN_LOG_ACTIVE_MS >= IMU_PREROLL_MS, "CAN pre-roll ring too short");
+    static LogRecord* ring = nullptr; static bool ringTried = false;
+    static uint16_t ringHead = 0, ringCount = 0; static bool wasReduced = false;
+    const uint32_t now = millis();
+    const bool active = gCarActive;
+    if (!active && !ringTried) {
+        ringTried = true;
+        if (psramRoomy()) ring = (LogRecord*)heap_caps_malloc(kPre * sizeof(LogRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    const bool queueDue = lastPushMs == 0 || (now - lastPushMs) >= (active ? CAN_LOG_ACTIVE_MS : CAN_LOG_MOTIONLESS_MS);
+    const bool ringDue  = !active && ring && (lastRingMs == 0 || (now - lastRingMs) >= CAN_LOG_ACTIVE_MS);
+    if (!queueDue && !ringDue) return;
+
+    LogRecord rec = {};
+    rec.ms = now;
+    if (!xSemaphoreTake(dataMutex, pdMS_TO_TICKS(2))) return;   // try again next sample
+    rec.canHz           = status.canHz;
+    rec.rpm             = can.rpm;
+    rec.tpsActual       = can.throttleActualPct;
+    rec.pedalReq        = can.pedalRequestedPct;
+    rec.targetTorque    = can.targetTorquePct;
+    rec.actualTorque    = can.actualTorquePct;
+    rec.vehicleSpeedKph = can.vehicleSpeedKph;
+    rec.coolantC        = can.coolantTempC;
+    rec.oilC            = can.oilTempC;
+    rec.oilBar          = can.oilPressBar;
+    rec.brakeBar        = can.brakePressBar;
+    rec.brakeSwitch     = can.brakeSwitch;
+    rec.brakeSwitch2    = can.brakeSwitch2;
+    rec.wsFL            = can.wsFL_kph;     rec.wsFR = can.wsFR_kph;
+    rec.wsRL            = can.wsRL_kph;     rec.wsRR = can.wsRR_kph;
+    rec.steerDeg        = can.steerAngleDeg;
+    rec.steerRate       = can.steerRateDegPerSec;
+    rec.fuelLevel       = can.fuelLevel;
+    rec.kickdown        = can.kickdown;
+    rec.atmosphericKpa  = can.atmosphericKpa;
+    rec.fuelTempC       = can.fuelTempC;
+    rec.engineTempC     = can.engineTempC;
+    rec.gear            = can.gear;
+    rec.pdkGearRaw      = can.pdkGearRaw;
+    rec.pdkSelectorRaw  = can.pdkSelectorRaw;
+    xSemaphoreGive(dataMutex);
+
+    Porsche718ExtraData x718;
+    rec.is718 = can_getPorsche718Extra(x718);
+    rec.gearValid718 = rec.is718 && !isnan(x718.gearValid) && x718.gearValid > 0.5f;
+    rec.intakeAirTempC         = rec.is718 ? x718.intakeAirTempC : NAN;
+    rec.manifoldAbsPressureBar = rec.is718 ? x718.manifoldAbsPressureBar : NAN;
+    rec.massAirFlowGps         = rec.is718 ? x718.massAirFlowGps : NAN;
+    rec.canLateralAccelG       = rec.is718 ? x718.canLateralAccelG : NAN;
+    rec.canLongitudinalAccelG  = rec.is718 ? x718.canLongitudinalAccelG : NAN;
+    rec.canYawRateDegPerSec    = rec.is718 ? x718.canYawRateDegPerSec : NAN;
+    rec.clutchPositionPercent  = rec.is718 ? x718.clutchPositionPercent : NAN;
+    rec.outsideTempC           = rec.is718 ? x718.outsideTempC : NAN;
+    rec.odometerKm             = rec.is718 ? x718.odometerKm : NAN;
+    rec.driveMode              = rec.is718 ? x718.driveMode : NAN;
+    rec.psmMode                = rec.is718 ? x718.psmMode : NAN;
+    rec.pdkState               = rec.is718 ? x718.pdkState : NAN;
+    rec.pdkNoDriveOrFault      = rec.is718 ? x718.pdkNoDriveOrFault : NAN;
+    rec.tpmsFrontLeftPsi       = rec.is718 ? x718.tpmsFrontLeftPsi : NAN;
+    rec.tpmsFrontRightPsi      = rec.is718 ? x718.tpmsFrontRightPsi : NAN;
+    rec.tpmsRearLeftPsi        = rec.is718 ? x718.tpmsRearLeftPsi : NAN;
+    rec.tpmsRearRightPsi       = rec.is718 ? x718.tpmsRearRightPsi : NAN;
+    rec.tpmsTempFrontLeftC     = rec.is718 ? x718.tpmsTempFrontLeftC : NAN;
+    rec.tpmsTempFrontRightC    = rec.is718 ? x718.tpmsTempFrontRightC : NAN;
+    rec.tpmsTempRearLeftC      = rec.is718 ? x718.tpmsTempRearLeftC : NAN;
+    rec.tpmsTempRearRightC     = rec.is718 ? x718.tpmsTempRearRightC : NAN;
+
+    if (!active) {
+        if (ring) { ring[ringHead] = rec; ringHead = (ringHead + 1) % kPre; if (ringCount < kPre) ringCount++; lastRingMs = now; }
+        wasReduced = true;
+        if (!queueDue) return;
+    } else if (wasReduced) {
+        wasReduced = false;
+        if (ring) {
+            const uint16_t first = (ringHead + kPre - ringCount) % kPre;
+            for (uint16_t i = 0; i < ringCount; i++) {
+                const LogRecord& p = ring[(first + i) % kPre];
+                if (p.ms > lastPushMs) xQueueSendToBack(canQueue, &p, 0);   // the row already written is not repeated
+            }
+        }
+        ringCount = 0; ringHead = 0;
+    }
+    lastPushMs = now;
+    xQueueSendToBack(canQueue, &rec, 0);
+}
+
+// ── sdlog_push_nmea ───────────────────────────────────────────────────────────
+// Called by gnss.cpp for every GGA/RMC line; a no-op unless the debug channel is on.
+void sdlog_push_nmea(const char* nmeaString) {
+    if (!nmeaQueue || !logNmea) return;
+    if (thermal_satCanImuInhibit()) return;   // same thermal pause as the sat log
+    NmeaLogRecord r;
+    r.ms = millis();
+    strlcpy(r.sentence, nmeaString, sizeof(r.sentence));
+    r.sentence[strcspn(r.sentence, "\r\n")] = '\0';
+    xQueueSendToBack(nmeaQueue, &r, 0);
+}
+
+// Rows each channel has written to its file, and what the SAT producer did with the rows it was
+// handed. The ten-second line in sdLogTask prints them, so a channel that stops while its file is
+// still open can be told apart from one that was switched off or never fed.
+static volatile uint32_t rowsImu = 0, rowsCan = 0, rowsSat = 0, rowsNmea = 0, rowsGps = 0;
+static volatile uint32_t satPushed = 0, satRefused = 0, satGated = 0;
 // ── sdlog_push_sat ────────────────────────────────────────────────────────────
 void sdlog_push_sat(const char* nmeaString) {
-    if (!satQueue || !logSat) return;
-    if (thermal_satCanImuInhibit()) return;   // ≥112°C: SD logging paused (see thermal.h)
+    if (!satQueue || !logSat) { satGated = satGated + 1; return; }
+    if (thermal_satCanImuInhibit()) { satGated = satGated + 1; return; }   // ≥112°C: SD logging paused (see thermal.h)
     SatLogRecord r;
     r.ms = millis();
     strlcpy(r.sentence, nmeaString, sizeof(r.sentence));
     // Strip trailing newlines so println doesn't double-space the file
     r.sentence[strcspn(r.sentence, "\r\n")] = '\0'; 
-    xQueueSendToBack(satQueue, &r, 0);
+    if (xQueueSendToBack(satQueue, &r, 0) == pdTRUE) satPushed = satPushed + 1;
+    else                                              satRefused = satRefused + 1;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -447,6 +699,29 @@ static void fmtF(char* b, size_t n, float v, int prec) {
 // snapshot needs to know about, this firmware just created. Newest-first,
 // matching the scan's ordering; the current oldest entry drops once
 // dirSnapCap is reached, the same truncation the scan reports.
+// The part of a log name that sorts chronologically: everything after the first underscore
+// (<type>_<stamp>…), whatever the length of <type> — gps_, canraw_ and debug_ differ.
+static const char* nameSortKey(const char* bare) {
+    const char* u = strchr(bare, '_');
+    return u ? u + 1 : bare;
+}
+
+bool sdlog_isLogFileName(const char* bare) {
+    if (!bare) return false;
+    const size_t n = strlen(bare);
+    if (n > 4 && strcmp(bare + n - 4, ".csv") == 0) return true;
+    return n > 4 && strncmp(bare, "debug_", 6) == 0 && strcmp(bare + n - 4, ".txt") == 0;
+}
+
+// A stored export archive. Deliberately separate from sdlog_isLogFileName(): that predicate also
+// decides what goes INTO an archive, and an archive must never contain another archive.
+bool sdlog_isArchiveName(const char* bare) {
+    if (!bare) return false;
+    const size_t n = strlen(bare);
+    if (n <= 4 || n >= LOG_NAME_MAX || strcmp(bare + n - 4, ".tar") != 0) return false;
+    return !strchr(bare, '/') && !strchr(bare, '\\');
+}
+
 static void snapshotNoteOpen(const char* name) {
     const char* bare = (name[0] == '/') ? name + 1 : name;
     if (!dirSnap || dirSnapCap <= 0) return;
@@ -474,6 +749,23 @@ static void snapshotNoteClose(const char* name, uint32_t finalSize) {
     xSemaphoreGive(dirSnapLock);
 }
 
+void sdlog_noteDebugFileOpen(const char* bare) {
+    if (!bare || !bare[0]) return;
+    snapshotNoteOpen(bare);
+    taskENTER_CRITICAL(&activeMux);
+    strncpy(debugFileName, bare, sizeof(debugFileName) - 1);
+    debugFileName[sizeof(debugFileName) - 1] = '\0';
+    debugFileBytes = 0;
+    taskEXIT_CRITICAL(&activeMux);
+}
+void sdlog_noteDebugFileSize(uint32_t bytes) { debugFileBytes = bytes; }
+void sdlog_noteDebugFileClosed(const char* bare, uint32_t finalSize) {
+    if (bare && bare[0]) snapshotNoteClose(bare, finalSize);
+    taskENTER_CRITICAL(&activeMux);
+    debugFileName[0] = '\0';
+    taskEXIT_CRITICAL(&activeMux);
+}
+
 // Public (sd_log.h): remove a snapshot entry once its file is deleted. The
 // incremental snapshot is never rebuilt from a fresh scan after boot, only
 // ever appended to — so a deletion has to be told explicitly, or the entry
@@ -487,15 +779,31 @@ void sdlog_noteFileDeleted(const char* name) {
             for (int j = i; j < dirSnapCount - 1; j++) dirSnap[j] = dirSnap[j + 1];
             dirSnapCount--;
             dirSnapGen++;
+            capRefreshReq = true;   // the free-space figure is now stale
             break;
         }
     }
     xSemaphoreGive(dirSnapLock);
 }
 
-static bool openFile(File& f, const char* name, const char* header) {
+// The deep queues are sized for PSRAM. Without it they would land in the internal heap, so each
+// falls back to its small size. 1 MB free is far more than they need.
+static bool psramRoomy() { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > (1024u * 1024u); }
+
+// stdio buffer for the logs that write a few KB/s. It is above SPIRAM_MALLOC_ALWAYSINTERNAL
+// (4 KB), so it lives in PSRAM and the six open files do not hold ~24 KB of the scarce internal
+// heap. The ESP32-S3 SD host cannot DMA from PSRAM (SOC_SDMMC_PSRAM_DMA_CAPABLE is not set), so
+// sdmmc_write_sectors writes such a buffer one 512 B sector per command through a bounce
+// buffer. That is acceptable at these rates; the raw CAN log, which is most of the card traffic,
+// does not use it (see the staging buffer below).
+static const size_t kBulkBufBytes = 16384;
+
+static bool openFile(File& f, const char* name, const char* header, size_t bufBytes) {
     f = SD_MMC.open(name, FILE_WRITE);
     if (!f) { Serial.printf("❌ SD: cannot open %s\n", name); return false; }
+    // Must precede the first write. Above 4 KB the buffer needs PSRAM; without it the vfs
+    // default (4 KB, internal) stays.
+    if (bufBytes != 4096 && (bufBytes < 4096 || psramRoomy())) f.setBufferSize(bufBytes);
     f.println(header);
     // Flush the header NOW. Row-count-based flushing means a channel that never
     // (or slowly) produces rows leaves the header stranded in the FatFs buffer;
@@ -507,12 +815,20 @@ static bool openFile(File& f, const char* name, const char* header) {
 }
 
 // Guarded close: always holds sdMutex. Returns true if closed cleanly.
+// The size recorded for the file list is read back from the directory entry
+// AFTER the close. Before the close, size() is the entry as of the last flush
+// (FatFs only updates it on sync) and misses the final stdio buffer — up to
+// 4 KB short, which is how a paused session listed wrong sizes for closed files.
 static bool closeFile(File& f, SemaphoreHandle_t m) {
     if (!f) return true;
     String   nm = f.name();
-    uint32_t sz = (uint32_t)f.size();
+    String   pth = f.path();
+    uint32_t sz = (uint32_t)f.position();   // fallback if the read-back fails
     if (xSemaphoreTake(m, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        f.close(); xSemaphoreGive(m);
+        f.close();
+        File r = SD_MMC.open(pth.c_str(), FILE_READ);
+        if (r) { sz = (uint32_t)r.size(); r.close(); }
+        xSemaphoreGive(m);
     } else {
         f.close(); // last resort — log will warn
         Serial.println("⚠️  SD: close without mutex (bus busy >1s)");
@@ -545,6 +861,63 @@ static bool printlnRetry(File& f, const char* row) {
         if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(5));
     }
     return false;
+}
+
+static bool printlnCounted(File& f, const char* row, volatile uint32_t& counter) {
+    if (!printlnRetry(f, row)) return false;
+    counter = counter + 1;
+    return true;
+}
+
+// ── Raw CAN staging ───────────────────────────────────────────────────────────
+// The raw CAN log is most of the card traffic (about 60 KB/s at 1,600 frames/s). Written row by
+// row through stdio it reaches FatFs as partial sectors at arbitrary file offsets, and FatFs
+// hands the SD host a buffer address that is then rarely 4-byte aligned, so the driver writes
+// one 512 B sector per command through a bounce buffer: a saturated card, GPS rows lost while
+// the raw log stays lossless. Rows are therefore collected in this internal-RAM buffer and
+// written in blocks of whole sectors. The buffer's start address is kept congruent to the
+// file offset modulo 4 (the header leaves the offset unaligned), so the address FatFs passes
+// the host for the full sectors is aligned and the block goes out as one multi-block command.
+// Every write is a multiple of 4 bytes, which keeps the offset phase; the 0–3 byte tail stays
+// staged. The one-second tick writes what is staged and syncs, so a power cut still loses at
+// most about a second.
+static const size_t kRawStageWrite = 4096;                 // block written once this much is staged
+static const size_t kRawStageBytes = kRawStageWrite + 128 + 4;   // plus a row or marker line, plus phase
+static uint8_t* sRawStage = nullptr;   // allocation, internal DMA-capable RAM
+static uint8_t* sRawData  = nullptr;   // first staged byte: sRawStage + (file offset & 3)
+static size_t   sRawLen   = 0;
+
+static bool rawStageAlloc() {
+    if (!sRawStage) sRawStage = (uint8_t*)heap_caps_malloc(kRawStageBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    return sRawStage != nullptr;
+}
+static void rawStageFree() {
+    if (sRawStage) heap_caps_free(sRawStage);
+    sRawStage = sRawData = nullptr; sRawLen = 0;
+}
+// Call once the file is open and its header written.
+static void rawStageBegin(File& f) { sRawLen = 0; sRawData = sRawStage + ((uint32_t)f.position() & 3u); }
+static inline void rawStageAppend(const char* s, size_t n) {
+    if (sRawLen + n > kRawStageBytes - 4) return;   // cannot happen: written out at 4 KB and lines are under 128 B
+    memcpy(sRawData + sRawLen, s, n); sRawLen += n;
+}
+// Writes the staged bytes: whole sectors once a block is ready, any multiple of 4 on the tick,
+// everything when all is set (file closing). Caller holds sdMutex.
+static bool rawStageWrite(File& f, bool tick, bool all) {
+    size_t n = all ? sRawLen : tick ? (sRawLen & ~(size_t)3) : (sRawLen >= kRawStageWrite ? (sRawLen & ~(size_t)511) : 0);
+    if (!n) return true;
+    if (f.write(sRawData, n) != n) return false;
+    sRawLen -= n; memmove(sRawData, sRawData + n, sRawLen);
+    return true;
+}
+
+// Writes out what is staged and releases the buffer; call just before the file is closed.
+static void rawStageFinish(File& f, SemaphoreHandle_t m) {
+    if (sRawStage && f && xSemaphoreTake(m, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        rawStageWrite(f, false, true);
+        xSemaphoreGive(m);
+    }
+    rawStageFree();
 }
 
 // Build a log filename that does NOT already exist on the card, so re-enabling
@@ -598,7 +971,10 @@ static void nextCanRawName(char* out, size_t cap) {
 // parks a huge response in internal RAM, and cannot trip the Task-WDT. The build
 // holds sdMutex for its duration, so logging should be stopped while exporting —
 // a concurrent recording will see queue gaps (no crash) while the build runs.
-#define EXPORT_PATH "/export.tar"
+// The archive is stored under its own name and stays on the card after the build, listed with the
+// logs, so an interrupted download is repeated from its link instead of rebuilt. Set by
+// sdlog_requestExport(); read by the web once the state is READY.
+static char exportPath[LOG_NAME_MAX + 1] = "/rcx_logs_all.tar";
 enum { EXP_IDLE = 0, EXP_BUILDING = 1, EXP_READY = 2, EXP_ERROR = 3 };
 static volatile int      exportState = EXP_IDLE;
 static volatile bool     exportReq   = false;
@@ -662,9 +1038,12 @@ static void buildExport() {
     if (!buf) { exportState = EXP_ERROR; Serial.println("📦 Export: no buffer"); return; }
 
     bool ok = false;
+    bool touched = false;                         // the archive's file was replaced or removed
+    uint32_t finalSize = 0;
     if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        SD_MMC.remove(EXPORT_PATH);               // rebuild fresh each time
-        File tar = SD_MMC.open(EXPORT_PATH, FILE_WRITE);
+        SD_MMC.remove(exportPath);                // rebuilding a name replaces the earlier archive
+        touched = true;
+        File tar = SD_MMC.open(exportPath, FILE_WRITE);
         if (tar) {
             uint8_t hdr[512];
             // Header + copy + pad + progress counters, shared by both the "walk
@@ -689,11 +1068,12 @@ static void buildExport() {
             // regardless. A member with a zeroed tail is recoverable; a
             // misaligned archive is not.
             bool degraded = false;
+            bool writeFailed = false;   // the card refused data (full, or a write error): the archive is incomplete
             auto writeExact = [&](const uint8_t* p, size_t n) -> bool {
                 // FatFs short writes misalign the archive exactly as short reads
                 // do, so the return value is checked rather than discarded.
                 size_t w = tar.write(p, n);
-                if (w != n) { degraded = true; return false; }
+                if (w != n) { degraded = true; writeFailed = true; return false; }
                 return true;
             };
             auto padZeros = [&](uint64_t n) -> bool {
@@ -755,7 +1135,13 @@ static void buildExport() {
                 // logger's own writes to it, the same reason deletes refuse an
                 // active file.
                 for (int i = 0; i < exportSelectCount; i++) {
-                    if (sdlog_isActiveFile(exportSelectNames[i])) continue;
+                    // The serial mirror is the exception: it stays open for the whole
+                    // session, but its writer (DebugLog::drainToFile) runs on this same
+                    // task and cannot run while this build holds sdMutex, so the copy
+                    // taken here is consistent up to its last ~1 s flush. Without this the
+                    // debug file could never be part of a session archive.
+                    const bool mirror = strncmp(exportSelectNames[i], "debug_", 6) == 0;
+                    if (!mirror && sdlog_isActiveFile(exportSelectNames[i])) continue;
                     String path = "/" + String(exportSelectNames[i]);
                     File f = SD_MMC.open(path, FILE_READ);
                     if (!f) continue;
@@ -769,8 +1155,8 @@ static void buildExport() {
                         File f = dir.openNextFile();
                         if (!f) break;
                         String nm = String(f.name());
-                        if (!nm.endsWith(".csv")) { f.close(); continue; }   // CSVs only
                         const char* bare = nm.startsWith("/") ? nm.c_str() + 1 : nm.c_str();
+                        if (!sdlog_isLogFileName(bare)) { f.close(); continue; }   // the logs and the serial mirror only
                         addFile(f, bare);
                         f.close();
                     }
@@ -782,6 +1168,7 @@ static void buildExport() {
             writeExact(buf, 512); writeExact(buf, 512);   // tar EOF: 2 zero blocks
             tar.flush();
             exportSize = tar.size();
+            finalSize = (uint32_t)exportSize;
             const bool aligned = (exportSize % 512) == 0;
             tar.close();
             // Both of these are structural: a length that is not a multiple of
@@ -796,11 +1183,26 @@ static void buildExport() {
                               (unsigned long long)exportSize,
                               aligned ? "512-aligned" : "NOT 512-aligned");
             }
-            ok = true;
+            // The archive now persists, so an incomplete one must not be left behind to be
+            // downloaded later as though it were whole. A full card is the usual cause.
+            if (writeFailed) {
+                SD_MMC.remove(exportPath);
+                Serial.printf("📦 Export: card refused writes (full?) — partial %s removed\n", exportPath + 1);
+            } else {
+                ok = true;
+            }
         }
         xSemaphoreGive(sdMutex);
     }
     free(buf);
+    // Listing bookkeeping runs after sdMutex is released: the snapshot has its own lock and the two
+    // are never nested (see sdlog_noteFileDeleted). The old entry goes first so a rebuilt name is
+    // listed once, then the new archive is added newest-first with its final size.
+    if (touched) {
+        sdlog_noteFileDeleted(exportPath);
+        if (ok) { snapshotNoteOpen(exportPath); snapshotNoteClose(exportPath, finalSize); }
+        capRefreshReq = true;                     // the archive took (or returned) card space
+    }
     exportState = ok ? EXP_READY : EXP_ERROR;
     Serial.printf("📦 Export %s: %d files, %llu bytes%s\n",
                   ok ? "ready" : "FAILED", exportCount, (unsigned long long)exportSize,
@@ -810,6 +1212,7 @@ static void buildExport() {
 // ── sdLogTask ─────────────────────────────────────────────────────────────────
 void sdLogTask(void*) {
     delay(800);
+    crumb::mark(crumb::SLOT_SDLOG, crumb::S_OPEN);   // card mount and first open are slow and belong to this phase
     SD_MMC.setPins(SD_CLK_PIN, SD_CMD_PIN, SD_D0_PIN, -1, -1, SD_D3_PIN);
     // maxOpenFiles=10 (was the library default of 5). With all four channels
     // logging, gps+imu+can+sat already hold 4 descriptors; the default 5 left
@@ -838,29 +1241,111 @@ void sdLogTask(void*) {
     // lost by dropping the standalone file that cluttered the dashboard file list.
 
     File    gpsFile, imuFile, canFile, satFile;
+    File    nmeaFile;                           // raw receiver capture (debug channel)
+    uint32_t flushNmea = 0; bool nmeaErr = false;
+    NmeaLogRecord nrec;
+    LogRecord     crec;                         // decoded CAN snapshot being written
     File    canRawFile;                         // sniffer raw-frame log (separate file)
     bool    gpsHdr = false, imuHdr = false, canHdr = false, satHdr = false;
+    // Each channel flushes on a one-second clock (millis() of its last flush), not every N rows:
+    // the flush cadence is then independent of the row rate, so the exposure on power loss is
+    // at most about one second per channel whatever the CAN load. Reset to 0 on open.
     uint32_t flushGps = 0, flushImu = 0, flushCan = 0, flushSat = 0, flushCanRaw = 0;
     bool     canRawSyncWritten = false;   // UTC marker written for the OPEN canraw file?
     uint32_t lastOpen  = 0;
-    bool    gpsErr = false, canErr = false, satErr = false;
-    char    sessionStamp[24] = "";   
+    bool    gpsErr = false, canErr = false, imuErr = false, satErr = false;
+    char    sessionStamp[24] = "";
+    // ── Write-failure recovery ───────────────────────────────────────────────
+    // PROTECTIVE NOTE: a failed write leaves the FatFs handle in its sticky error
+    // state (FIL.err, set by ABORT) — every later write on that handle fails too,
+    // until it is closed. The SDMMC driver produces exactly such transient
+    // failures (per-call 512 B DMA bounce buffer, ESP_ERR_NO_MEM under DMA-pool
+    // pressure — see printlnRetry). So ANY channel's failed write closes that
+    // channel's file at once, and it reopens within the SAME session stamp
+    // (uniqueLogName() gives gps_<stamp>_2.csv …), so the session stays one
+    // group on the dashboard and in its archive. Previously IMU and SAT only
+    // cleared a header flag and kept writing into the dead handle for the rest
+    // of the session, and GPS discarded the session stamp, so GPS and CAN came
+    // back as a different session.
+    // A card that keeps failing (or is full: open() still succeeds, the first
+    // write fails) must not be answered with a new file every half second, so
+    // the reopen delay doubles with each fault inside a minute of the last, up
+    // to a minute, and no reopen is attempted while the card is nearly full.
+    bool     recovering   = false;    // a channel failed; reopen it in this session
+    uint32_t recoverAt    = 0;        // next reopen attempt (millis)
+    uint32_t recoverDelay = 0;        // current reopen delay (backoff)
+    uint32_t lastFaultMs  = 0;
+    bool     fullNoted    = false;    // "card full" logged for this recovery
+    const uint32_t SD_RECOVER_MIN_MS = 500, SD_RECOVER_MAX_MS = 60000;
+    const uint64_t SD_MIN_FREE_BYTES = 4ULL * 1024 * 1024;
+    auto failChannel = [&](File& f, const char* what) {
+        closeFile(f, sdMutex);
+        const uint32_t writeFaults = sdWriteFaults + 1;   // single writer (sdLogTask)
+        sdWriteFaults = writeFaults;
+        const bool streak = lastFaultMs != 0 && (millis() - lastFaultMs) < 60000;
+        recoverDelay = streak ? (recoverDelay * 2 > SD_RECOVER_MAX_MS ? SD_RECOVER_MAX_MS : recoverDelay * 2)
+                              : SD_RECOVER_MIN_MS;
+        lastFaultMs  = millis();
+        recovering   = true;
+        fullNoted    = false;
+        recoverAt    = millis() + recoverDelay;
+        capRefreshReq = true;                 // a full card is the usual cause: re-measure it
+        Serial.printf("⚠️  SD %s: write failed — file closed, reopening in this session in %lus (fault #%lu)\n",
+                      what, (unsigned long)((recoverDelay + 999) / 1000), (unsigned long)writeFaults);
+    };
 
     LogRecord    rec;
     ImuLogRecord irec;
     SatLogRecord srec;
 
     for (;;) {
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_PUBLISH);
         // ── Publish the currently-open files for the default web view ──────
         // Derived from the live File handles every pass, so we never have to
         // instrument each close site. Names are reconstructed from the shared
         // sessionStamp; setActive() is a no-op when nothing changed.
         {
-            char nm[LOG_NAME_MAX];
-            if (gpsFile && sessionStamp[0]) { snprintf(nm, sizeof(nm), "gps_%s.csv", sessionStamp); setActive(0, nm); } else setActive(0, nullptr);
-            if (canFile && sessionStamp[0]) { snprintf(nm, sizeof(nm), "can_%s.csv", sessionStamp); setActive(1, nm); } else setActive(1, nullptr);
-            if (imuFile && sessionStamp[0]) { snprintf(nm, sizeof(nm), "imu_%s.csv", sessionStamp); setActive(2, nm); } else setActive(2, nullptr);
-            if (satFile && sessionStamp[0]) { snprintf(nm, sizeof(nm), "sat_%s.csv", sessionStamp); setActive(3, nm); } else setActive(3, nullptr);
+            // The handle's own name, never one rebuilt from sessionStamp: a file
+            // reopened within a session carries a uniqueLogName() suffix (_2, _3…),
+            // and a rebuilt name would protect the CLOSED original from web delete
+            // while leaving the live file deletable (FatFs corruption + reset).
+            setActive(0, gpsFile ? gpsFile.name() : nullptr);
+            setActive(1, canFile ? canFile.name() : nullptr);
+            setActive(2, imuFile ? imuFile.name() : nullptr);
+            setActive(3, satFile ? satFile.name() : nullptr);
+            setActive(4, nmeaFile ? nmeaFile.name() : nullptr);
+            // Ten-second account of every channel: rows written, what the SAT producer was handed and
+            // did with it, the queue depths, which channels are switched on and which have a file
+            // open. It goes to the serial mirror like every other line, so a channel that goes quiet
+            // while the others run shows here which of those it is: switched off (flag false), never
+            // fed (pushed flat, gated rising), fed but not drained (pushed rising, queued rising),
+            // or draining into a file that is not there (flag true, no file).
+            static uint32_t lastAcctMs = 0;
+            if (millis() - lastAcctMs >= 10000) {
+                lastAcctMs = millis();
+                Serial.printf("💾 [%lus] SD rows gps %lu imu %lu can %lu sat %lu nmea %lu | sat pushed %lu refused %lu gated %lu queued %u | "
+                              "on g%d i%d c%d s%d n%d | open g%d i%d c%d s%d n%d raw%d | faults %lu%s\n",
+                              (unsigned long)(millis() / 1000UL),
+                              (unsigned long)rowsGps, (unsigned long)rowsImu, (unsigned long)rowsCan, (unsigned long)rowsSat, (unsigned long)rowsNmea,
+                              (unsigned long)satPushed, (unsigned long)satRefused, (unsigned long)satGated,
+                              (unsigned)(satQueue ? uxQueueMessagesWaiting(satQueue) : 0),
+                              (int)logGps, (int)logImu, (int)logCan, (int)logSat, (int)logNmea,
+                              (int)(bool)gpsFile, (int)(bool)imuFile, (int)(bool)canFile, (int)(bool)satFile, (int)(bool)nmeaFile, (int)(bool)canRawFile,
+                              (unsigned long)sdWriteFaults, recovering ? " | recovering" : "");
+            }
+            // Serial mirror: publish the session stamp, start a new mirror file when the
+            // session changes, and move buffered serial text to the card. Without this call
+            // the mirror's ring is never emptied and no debug file is ever created.
+            if (strcmp(pubStamp, sessionStamp) != 0) {
+#if defined(DEBUG_SERIAL_TO_SD) && DEBUG_SERIAL_TO_SD
+                if (pubStamp[0] && sessionStamp[0]) DebugLog::closeFile();
+#endif
+                strncpy(pubStamp, sessionStamp, sizeof(pubStamp) - 1);
+                pubStamp[sizeof(pubStamp) - 1] = '\0';
+            }
+#if defined(DEBUG_SERIAL_TO_SD) && DEBUG_SERIAL_TO_SD
+            DebugLog::drainToFile();
+#endif
             // Live on-disk sizes for the display + web listing. .size() is an fstat
             // (no media I/O) — compute OUTSIDE the activeMux critical section (never
             // call into the VFS with interrupts disabled), then publish. Rate-limited
@@ -872,13 +1357,16 @@ void sdLogTask(void*) {
                 uint32_t cz = canFile ? (uint32_t)canFile.size() : 0;
                 uint32_t iz = imuFile ? (uint32_t)imuFile.size() : 0;
                 uint32_t sz4 = satFile ? (uint32_t)satFile.size() : 0;
+                uint32_t nz  = nmeaFile ? (uint32_t)nmeaFile.size() : 0;
                 taskENTER_CRITICAL(&activeMux);
                 activeBytesByType[0] = gz; activeBytesByType[1] = cz;
                 activeBytesByType[2] = iz; activeBytesByType[3] = sz4;
+                activeBytesByType[4] = nz;
                 taskEXIT_CRITICAL(&activeMux);
             }
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_CAPACITY);
         // ── Refresh SD capacity cache (off the async_tcp task) ─────────────
         // First call after mount can be slow (f_getfree walks the FAT); FatFs
         // caches the free count afterward so later calls are cheap. Done here, on
@@ -888,8 +1376,9 @@ void sdLogTask(void*) {
         // reads, and the 30 s cadence means skipping a pass costs nothing but a
         // briefly stale free-space figure — it runs on the very next pass after
         // the last transfer ends.
-        if ((capTotal == 0 || millis() - capLastMs > 30000) && downloadActive == 0) {
+        if ((capTotal == 0 || capRefreshReq || millis() - capLastMs > 30000) && downloadActive == 0) {
             if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+                capRefreshReq = false;
                 capTotal  = SD_MMC.totalBytes();
                 capUsed   = SD_MMC.usedBytes();
                 capLastMs = millis();
@@ -897,6 +1386,7 @@ void sdLogTask(void*) {
             }
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_DIRSCAN);
         // ── Service the one boot-time directory scan (off the async_tcp task) ─
         // dirScanReq is set exactly once, at boot (see sdlog_init), to discover
         // files left over from past power cycles — see sd_log.h for why nothing
@@ -932,12 +1422,12 @@ void sdLogTask(void*) {
                     String  nm2 = String(f.name());
                     uint32_t sz = (uint32_t)f.size();
                     f.close();
-                    if (!nm2.endsWith(".csv")) continue;
                     const char* bare = nm2.startsWith("/") ? nm2.c_str() + 1 : nm2.c_str();
-                    const char* key  = (strlen(bare) > 4) ? bare + 4 : bare;   // skip "xxx_"
+                    if (!sdlog_isLogFileName(bare) && !sdlog_isArchiveName(bare)) continue;   // logs, serial mirror, stored archives
+                    const char* key  = nameSortKey(bare);
                     // Descending insertion by timestamp key → newest first.
                     int pos = dirScanCnt;
-                    while (pos > 0 && strcmp(dirScanTmp[pos - 1].name + 4, key) < 0) pos--;
+                    while (pos > 0 && strcmp(nameSortKey(dirScanTmp[pos - 1].name), key) < 0) pos--;
                     if (pos >= dirSnapCap) { dirScanTrunc = true; continue; }
                     if (dirScanCnt >= dirSnapCap) {          // table full: drop oldest
                         dirScanTrunc = true;
@@ -980,17 +1470,15 @@ void sdLogTask(void*) {
         }
 
         // ── Service a "Download all" export request (off the async_tcp task) ─
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_EXPORT);
         if (exportReq) { exportReq = false; buildExport(); }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_RAWCAN);
         // ── CAN raw sniffer log (separate file, only while sniffer is ON) ──
-        // Independent of GPS *fix* — you sniff on the bench with no lock. By
-        // DEFAULT it is also mutually exclusive with the normal gps/can/imu/sat
-        // channels (enabling the sniffer forces them off) so one writer owns the
-        // SD bus. That default can be overridden: /can/sniff?force=1 keeps the
-        // channels running alongside the sniffer for concurrent capture (see the
-        // web confirm dialog). The branches and queues here are disjoint, so
-        // concurrency is safe against corruption — the only risk is SD write
-        // throughput under heavy bus load, surfaced via the sniffer drop counters.
+        // Independent of GPS *fix* — you sniff on the bench with no lock. It runs alongside
+        // the normal gps/can/imu/sat channels: the branches and queues are disjoint, so
+        // concurrent capture is safe against corruption, and the sniffer's own drop counters
+        // show any shortfall in SD write throughput under heavy bus load.
         //
         // Filename policy:
         //   • UTC known   → canraw_YYYYMMDD_HHMMSS.csv (same stamp as the other
@@ -1002,18 +1490,27 @@ void sdLogTask(void*) {
         // absolute UTC. Row format is unix_ms,id_hex,dlc,data_hex; the decoded
         // can_*.csv is a completely separate file and is untouched.
         {
-            bool sniffOn = can_getSniffer();
-            if (sniffOn && !canRawFile) {
+            const bool sniffRequested = can_getSniffer();
+            bool sniffOn = sniffRequested && !sRawHold;
+            static uint32_t canRawRetryAt = 0;   // after a failed write: reopen no sooner than this
+            if (sniffOn && !canRawFile && (canRawRetryAt == 0 || (int32_t)(millis() - canRawRetryAt) >= 0)) {
                 char rn[40];
                 if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
                     if (sessionStamp[0])
                         uniqueLogName(rn, sizeof(rn), "canraw", sessionStamp);
                     else
                         nextCanRawName(rn, sizeof(rn));   // scans root under sdMutex
-                    bool ok = openFile(canRawFile, rn, "unix_ms,id,dlc,data");
+                    // Staged rows go out in whole-sector blocks straight from the staging
+                    // buffer, so stdio only needs a one-sector buffer; if the staging buffer
+                    // cannot be had, rows go through the 16 KB stdio buffer as before.
+                    const bool staged = rawStageAlloc();
+                    bool ok = openFile(canRawFile, rn, "unix_ms,id,dlc,data", staged ? 512 : kBulkBufBytes);
+                    if (ok && staged) rawStageBegin(canRawFile);
+                    if (!ok) rawStageFree();
                     xSemaphoreGive(sdMutex);
                     if (ok) {
                         snapshotNoteOpen(rn);
+                        canRawRetryAt = 0;                // backoff served
                         canRawSyncWritten = false;        // (re)arm UTC marker for this file
                         // Register as an OPEN file so a web delete (single or bulk)
                         // can't SD_MMC.remove() it out from under us — removing an
@@ -1023,15 +1520,17 @@ void sdLogTask(void*) {
                         strncpy(canRawName, bare, sizeof(canRawName) - 1);
                         canRawName[sizeof(canRawName) - 1] = '\0';
                         taskEXIT_CRITICAL(&activeMux);
-                        Serial.printf("🔎 SD CANraw: logging ALL frames → %s\n", rn);
+                        Serial.printf("🔎 SD CANraw: logging ALL frames → %s (%s)\n", rn,
+                                      sRawStage ? "aligned block writes" : "⚠️ staging buffer unavailable, slow write path");
                     }
                 }
             } else if (!sniffOn && canRawFile) {
+                rawStageFinish(canRawFile, sdMutex);
                 closeFile(canRawFile, sdMutex);
                 taskENTER_CRITICAL(&activeMux);
                 canRawName[0] = '\0';                      // closed — now deletable
                 taskEXIT_CRITICAL(&activeMux);
-                Serial.println("🔎 SD CANraw: closed (sniffer off)");
+                Serial.println(sniffRequested ? "🔎 SD CANraw: closed (held for an NTRIP scan; frames queue and resume in a new file)" : "🔎 SD CANraw: closed (sniffer off)");
             }
 
             // ── UTC sync marker ──────────────────────────────────────────────
@@ -1048,8 +1547,8 @@ void sdLogTask(void*) {
                              (unsigned long)mnow,
                              (unsigned long long)toUnixMs(mnow),
                              (long long)gUnixMsOffset);
-                    canRawFile.println(sync);
-                    canRawFile.flush();
+                    if (sRawStage) { rawStageAppend(sync, strlen(sync)); rawStageAppend("\r\n", 2); }
+                    else { canRawFile.println(sync); canRawFile.flush(); }
                     xSemaphoreGive(sdMutex);
                     canRawSyncWritten = true;
                     Serial.printf("🔎 SD CANraw: UTC sync marker → %s\n", sync);
@@ -1065,7 +1564,18 @@ void sdLogTask(void*) {
             if (canRawFile && canRawQueue && !thermal_canSniffInhibit()) {
                 CanRawRecord rr; int drained = 0;
                 static const char HEXD[] = "0123456789ABCDEF";
-                while (drained < 512 && xQueueReceive(canRawQueue, &rr, 0) == pdTRUE) {
+                bool rawErr = false;
+                while (drained < 512) {
+                    // A full staging block goes to the card before the next row is taken. If the
+                    // card is busy past the mutex wait, leave the rest in the queue (16384 deep)
+                    // for the next pass rather than overrun the stage.
+                    if (sRawStage && sRawLen >= kRawStageWrite) {
+                        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) != pdTRUE) break;
+                        rawErr = !rawStageWrite(canRawFile, false, false);
+                        xSemaphoreGive(sdMutex);
+                        if (rawErr) break;
+                    }
+                    if (xQueueReceive(canRawQueue, &rr, 0) != pdTRUE) break;
                     char hx[17];                         // up to 8 bytes -> 16 hex chars
                     int p = 0;
                     for (int b = 0; b < rr.dlc && b < 8; b++) {
@@ -1074,60 +1584,213 @@ void sdLogTask(void*) {
                     }
                     hx[p] = '\0';
                     char row[48];
-                    snprintf(row, sizeof(row), "%llu,%03X,%u,%s",
+                    const int rowLen = snprintf(row, sizeof(row), "%llu,%03X,%u,%s",
                              (unsigned long long)toUnixMs(rr.ms), rr.id, rr.dlc, hx);
-                    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                        canRawFile.println(row);
-                        if (++flushCanRaw >= 200) { canRawFile.flush(); flushCanRaw = 0; }
+                    if (sRawStage) {
+                        rawStageAppend(row, (size_t)rowLen); rawStageAppend("\r\n", 2);
+                    } else if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        if (canRawFile.println(row) == 0) rawErr = true;
+                        else if (millis() - flushCanRaw >= 1000) { canRawFile.flush(); flushCanRaw = millis(); }
                         xSemaphoreGive(sdMutex);
                     }
+                    if (rawErr) break;
                     drained++;
+                }
+                // One-second tick: write what is staged (a multiple of 4 bytes) and sync, so a
+                // power cut loses about a second at most. Runs on idle passes too.
+                if (!rawErr && sRawStage && millis() - flushCanRaw >= 1000 &&
+                    xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    if (rawStageWrite(canRawFile, true, false)) { canRawFile.flush(); flushCanRaw = millis(); }
+                    else rawErr = true;
+                    xSemaphoreGive(sdMutex);
+                }
+                if (rawErr) {
+                    // Same sticky FatFs error as the channel logs (see
+                    // failChannel): close now, reopen as canraw_<stamp>_2.csv.
+                    rawStageFree();
+                    closeFile(canRawFile, sdMutex);
+                    taskENTER_CRITICAL(&activeMux);
+                    canRawName[0] = '\0';
+                    taskEXIT_CRITICAL(&activeMux);
+                    canRawRetryAt = (millis() + 500) | 1;   // never 0 (0 = no backoff)
+                    Serial.println("⚠️  SD CANraw: write failed — file closed, reopening");
                 }
             }
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_IMU);
         // ── Drain IMU queue (non-blocking, high priority) ──────────────────
         while (imuFile && logImu && xQueueReceive(imuQueue, &irec, 0) == pdTRUE) {
+            // Full sensor resolution. One count is 8/32768 = 0.000244 g and
+            // 512/32768 = 0.0156 deg/s; logging to 0.0001 g and 0.01 deg/s is
+            // finer than one count, so every distinct reading stays distinct
+            // (a coarser format merges neighbouring counts and discards real
+            // signal — the gyro noise floor is about one 0.1 deg/s step).
+            // Longest row: 13-digit ms + 3 x "-8.0000" + 3 x "-512.00" = 61 chars.
             char row[80];
-            snprintf(row, sizeof(row), "%llu,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f",
+            snprintf(row, sizeof(row), "%llu,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f",
                      (unsigned long long)toUnixMs(irec.ms),
                      irec.ax, irec.ay, irec.az, irec.gx, irec.gy, irec.gz);
             if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (!printlnRetry(imuFile, row)) imuHdr = false;
-                else if (++flushImu >= 50) { imuFile.flush(); flushImu = 0; }
+                if (!printlnCounted(imuFile, row, rowsImu)) imuErr = true;
+                else if (millis() - flushImu >= 1000) { imuFile.flush(); flushImu = millis(); }
                 xSemaphoreGive(sdMutex);
             }
+            if (imuErr) { imuErr = false; imuHdr = false; failChannel(imuFile, "IMU"); break; }
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_SAT);
         // ── Drain SAT queue (non-blocking) ─────────────────────────────────
         while (satFile && logSat && xQueueReceive(satQueue, &srec, 0) == pdTRUE) {
             char row[128];
             snprintf(row, sizeof(row), "%llu,%s", (unsigned long long)toUnixMs(srec.ms), srec.sentence);
             if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (!printlnRetry(satFile, row)) satHdr = false;  
-                else if (++flushSat >= 15) { satFile.flush(); flushSat = 0; }
+                if (!printlnCounted(satFile, row, rowsSat)) satErr = true;
+                else if (millis() - flushSat >= 1000) { satFile.flush(); flushSat = millis(); }
                 xSemaphoreGive(sdMutex);
+            }
+            if (satErr) { satErr = false; satHdr = false; failChannel(satFile, "SAT"); break; }
+        }
+
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_NMEA);
+        // ── Drain raw receiver capture (debug channel, non-blocking) ───────
+        while (nmeaFile && logNmea && xQueueReceive(nmeaQueue, &nrec, 0) == pdTRUE) {
+            char row[128];
+            snprintf(row, sizeof(row), "%llu,%s", (unsigned long long)toUnixMs(nrec.ms), nrec.sentence);
+            if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                if (!printlnCounted(nmeaFile, row, rowsNmea)) nmeaErr = true;
+                else if (millis() - flushNmea >= 1000) { nmeaFile.flush(); flushNmea = millis(); }
+                xSemaphoreGive(sdMutex);
+            }
+            if (nmeaErr) { nmeaErr = false; failChannel(nmeaFile, "NMEA"); break; }
+        }
+
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_CAN);
+        // ── Decoded CAN channel ────────────────────────────────────────────
+        // Rows come from canQueue (sdlog_push_can), not from the GPS epoch record: 50 Hz while the
+        // car is active, once a second after a minute of stillness. Drained every pass so the
+        // GPS-queue wait below does not set this channel's cadence. The row's utc_time is derived
+        // from its unix_ms. Thermal threshold 3 (thermal.h) pauses it at >=112 C.
+        // While the bus reads silent (canHz==0, vehicle off) the row rate drops to once every
+        // CAN_IDLE_LOG_MS.
+        while (canQueue && xQueueReceive(canQueue, &crec, 0) == pdTRUE) {
+            char utc[24] = "--:--:--.---";
+            if (gClockSet) fmtUtcMs(toUnixMs(crec.ms), utc, sizeof(utc));
+            static uint32_t lastCanWriteMs = 0;
+            bool canIdle = crec.canHz <= 0.0f;
+            bool writeCanNow = !canIdle || lastCanWriteMs == 0 ||
+                               (millis() - lastCanWriteMs) >= CAN_IDLE_LOG_MS;
+            if (canFile && logCan && writeCanNow && !thermal_satCanImuInhibit()) {
+                lastCanWriteMs = millis();
+                char rpm[10],tps[8],ped[8],tqt[8],tqa[8],veh[8],ect[8],oilT[8],oilP[8],brk[8];
+                // Speeds, steering and CAN yaw keep the car's own resolution (987
+                // vehicle speed 0.01 km/h -> 3 decimals in mph; wheel speeds and
+                // steering -> 2; 718 yaw 0.01 deg/s -> 2). st holds "-1474.52".
+                char brSw[4],brSw2[4],wlf[8],wrf[8],wlr[8],wrr[8],st[10],sr[8];
+                char fuel[8],kick[4],baro[8],fuelT[8],engT[8],gear[4],pdkRaw[8],pdkSel[8];
+                char iat[8],map[8],maf[10],latG[10],longG[10],canYaw[10],clutch[8];
+                char outside[8],odo[12],drive[5],psm[5],pdkState[5],pdkFault[5];
+                char tpLF[8],tpRF[8],tpLR[8],tpRR[8],ttLF[8],ttRF[8],ttLR[8],ttRR[8];
+                fmtF(rpm,   sizeof(rpm),   crec.rpm,          0);
+                fmtF(tps,   sizeof(tps),   crec.tpsActual,    1);
+                fmtF(ped,   sizeof(ped),   crec.pedalReq,     1);
+                fmtF(tqt,   sizeof(tqt),   crec.targetTorque, 1);
+                fmtF(tqa,   sizeof(tqa),   crec.actualTorque, 1);
+                fmtF(veh,   sizeof(veh),   kphToMph(crec.vehicleSpeedKph), 3);
+                fmtF(ect,   sizeof(ect),   cToF(crec.coolantC), 1);
+                fmtF(oilT,  sizeof(oilT),  cToF(crec.oilC), 1);
+                fmtF(oilP,  sizeof(oilP),  barToPsi(crec.oilBar), 2);
+                fmtF(brk,   sizeof(brk),   barToPsi(crec.brakeBar), 1);
+                fmtF(brSw,  sizeof(brSw),  crec.brakeSwitch,  0);
+                fmtF(brSw2, sizeof(brSw2), crec.brakeSwitch2, 0);
+                fmtF(wlf,   sizeof(wlf),   kphToMph(crec.wsFL), 2);
+                fmtF(wrf,   sizeof(wrf),   kphToMph(crec.wsFR), 2);
+                fmtF(wlr,   sizeof(wlr),   kphToMph(crec.wsRL), 2);
+                fmtF(wrr,   sizeof(wrr),   kphToMph(crec.wsRR), 2);
+                fmtF(st,    sizeof(st),    crec.steerDeg,     2);
+                fmtF(sr,    sizeof(sr),    crec.steerRate,    1);
+                fmtF(fuel,  sizeof(fuel),  crec.fuelLevel,    1);
+                fmtF(kick,  sizeof(kick),  crec.kickdown,     0);
+                fmtF(baro,  sizeof(baro),  kpaToPsi(crec.atmosphericKpa), 2);
+                fmtF(fuelT, sizeof(fuelT), cToF(crec.fuelTempC), 1);
+                fmtF(engT,  sizeof(engT),  cToF(crec.engineTempC), 1);
+                if (crec.is718 && !crec.gearValid718) gear[0] = '\0';
+                else snprintf(gear, sizeof(gear), "%u", (unsigned)crec.gear);
+                fmtF(pdkRaw, sizeof(pdkRaw), crec.pdkGearRaw, 0);
+                fmtF(pdkSel, sizeof(pdkSel), crec.pdkSelectorRaw, 0);
+
+                fmtF(iat,      sizeof(iat),      cToF(crec.intakeAirTempC), 1);
+                fmtF(map,      sizeof(map),      barToPsi(crec.manifoldAbsPressureBar), 2);
+                fmtF(maf,      sizeof(maf),      crec.massAirFlowGps, 1);
+                fmtF(latG,     sizeof(latG),     crec.canLateralAccelG, 3);
+                fmtF(longG,    sizeof(longG),    crec.canLongitudinalAccelG, 3);
+                fmtF(canYaw,   sizeof(canYaw),   crec.canYawRateDegPerSec, 2);
+                fmtF(clutch,   sizeof(clutch),   crec.clutchPositionPercent, 1);
+                fmtF(outside,  sizeof(outside),  cToF(crec.outsideTempC), 1);
+                fmtF(odo,      sizeof(odo),      isnan(crec.odometerKm) ? NAN : crec.odometerKm * 0.621371f, 1);
+                fmtF(drive,    sizeof(drive),    crec.driveMode, 0);
+                fmtF(psm,      sizeof(psm),      crec.psmMode, 0);
+                fmtF(pdkState, sizeof(pdkState), crec.pdkState, 0);
+                fmtF(pdkFault, sizeof(pdkFault), crec.pdkNoDriveOrFault, 0);
+                fmtF(tpLF,     sizeof(tpLF),     crec.tpmsFrontLeftPsi, 1);
+                fmtF(tpRF,     sizeof(tpRF),     crec.tpmsFrontRightPsi, 1);
+                fmtF(tpLR,     sizeof(tpLR),     crec.tpmsRearLeftPsi, 1);
+                fmtF(tpRR,     sizeof(tpRR),     crec.tpmsRearRightPsi, 1);
+                fmtF(ttLF,     sizeof(ttLF),     cToF(crec.tpmsTempFrontLeftC), 1);
+                fmtF(ttRF,     sizeof(ttRF),     cToF(crec.tpmsTempFrontRightC), 1);
+                fmtF(ttLR,     sizeof(ttLR),     cToF(crec.tpmsTempRearLeftC), 1);
+                fmtF(ttRR,     sizeof(ttRR),     cToF(crec.tpmsTempRearRightC), 1);
+
+                char row[768];
+                snprintf(row, sizeof(row),
+                    "%llu,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+                    (unsigned long long)toUnixMs(crec.ms), utc,
+                    rpm, tps, ped, tqt, tqa, veh, ect, oilT, oilP, brk, brSw, brSw2,
+                    wlf, wrf, wlr, wrr, st, sr, fuel, kick, baro, fuelT, engT, gear, pdkRaw, pdkSel,
+                    iat, map, maf, latG, longG, canYaw, clutch, outside, odo, drive, psm,
+                    pdkState, pdkFault, tpLF, tpRF, tpLR, tpRR, ttLF, ttRF, ttLR, ttRR);
+                if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    if (!printlnCounted(canFile, row, rowsCan)) {
+                        canErr = true; Serial.println("❌ SD CAN: write failed");
+                    } else if (millis() - flushCan >= 1000) { canFile.flush(); flushCan = millis(); }
+                    xSemaphoreGive(sdMutex);
+                }
+                if (canErr) {
+                    canHdr = false; canErr = false;
+                    failChannel(canFile, "CAN");
+                }
             }
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_WAIT);
         // ── Wait for GPS+CAN record ────────────────────────────────────────
         if (xQueueReceive(logQueue, &rec, pdMS_TO_TICKS(100)) != pdTRUE) {
             if (!logGps && gpsFile) { closeFile(gpsFile, sdMutex); gpsHdr=false; activeLogName[0]='\0'; }
             if (!logImu && imuFile) { closeFile(imuFile, sdMutex); imuHdr=false; }
             if (!logCan && canFile) { closeFile(canFile, sdMutex); canHdr=false; }
             if (!logSat && satFile) { closeFile(satFile, sdMutex); satHdr=false; }
+            if (!logNmea && nmeaFile) closeFile(nmeaFile, sdMutex);
             continue;
         }
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_OPEN);
         // ── Open files on first valid GPS fix ─────────────────────────────
+        const bool cardFull = capTotal > 0 && (capTotal - capUsed) < SD_MIN_FREE_BYTES;
+        if (recovering && cardFull && !fullNoted) {
+            fullNoted = true;
+            Serial.println("❌ SD: card full — logging stopped until space is freed");
+        }
         bool canOpen = rec.valid && rec.year >= 2024 && rec.year <= 2050
-                    && (millis() - lastOpen >= 5000 || lastOpen == 0);
+                    && !(recovering && cardFull)
+                    && (millis() - lastOpen >= 5000 || lastOpen == 0 ||
+                        (recovering && (int32_t)(millis() - recoverAt) >= 0));
         // New logging session: if nothing is currently open, drop the old stamp
         // so the next files use a FRESH (current) timestamp rather than reopening
         // — and truncating — the previous session's files. (Per-channel reopens
         // while other channels stay open keep the shared stamp; uniqueLogName()
         // then guarantees those still land in a new file, not an overwrite.)
-        if (canOpen && !gpsFile && !canFile && !imuFile && !satFile)
+        if (canOpen && !recovering && !gpsFile && !canFile && !imuFile && !satFile && !nmeaFile)
             sessionStamp[0] = '\0';
         if (canOpen && sessionStamp[0] == '\0') {
             // The stamp is GPS UTC — the device has no local-time notion at all.
@@ -1150,8 +1813,10 @@ void sdLogTask(void*) {
             if (epoch > 1700000000) {          // sanity: after 2023-11
                 struct timeval tv; tv.tv_sec = epoch; tv.tv_usec = (suseconds_t)rec.msec * 1000;
                 settimeofday(&tv, nullptr);
-                gClockSet = true;
                 gUnixMsOffset = (int64_t)epoch * 1000 + rec.msec - (int64_t)rec.ms;
+                gAnchorMs     = rec.ms;
+                gAnchorUnixMs = (int64_t)epoch * 1000 + rec.msec;
+                gClockSet = true;
                 Serial.printf("🕐 System clock set from GPS: %04u-%02u-%02u %02u:%02u:%02u UTC (epoch %lu)\n",
                               rec.year, rec.mon, rec.day, rec.hr, rec.min, rec.sec,
                               (unsigned long)epoch);
@@ -1175,11 +1840,16 @@ void sdLogTask(void*) {
                         // ble_dlv / ble_sup: cumulative samples delivered over BLE vs
                         // produced-but-never-sent — diffing rows gives the true wire
                         // rate and loss for any time window, from the log alone.
-                        "diff_age,ble,ble_dlv,ble_sup");
+                        "diff_age,ble,ble_dlv,ble_sup,"
+                        // vel_src: 0 receiver, 1 RTK track (receiver SOG/COG empty),
+                        // 2 RTK track (receiver repeated its last value), 3 none.
+                        // spd_age_ms is the age of the RECEIVER's own velocity.
+                        "vel_src,trk_spd_mph,trk_hdg_deg", kBulkBufBytes);
                     xSemaphoreGive(sdMutex);
                     if (ok) {
                         snapshotNoteOpen(name);
                         logFileCount++; gpsHdr = true; flushGps = 0; gpsErr = false;
+                        setActive(0, gpsFile.name());   // protected from web delete at once
                         strncpy(activeLogName, name, sizeof(activeLogName) - 1);
                         Serial.printf("📝 SD GPS: %s\n", name);
                         lastOpen = millis();
@@ -1206,9 +1876,9 @@ void sdLogTask(void*) {
                         "IAT,MAP,MAF,CANLatG,CANLongG,CANYaw,ClutchPos,"
                         "OutsideTmp,Odometer,DriveMode,PSMMode,PDKState,PDKFault,"
                         "TPMSLF,TPMSRF,TPMSLR,TPMSRR,"
-                        "TPMSTmpLF,TPMSTmpRF,TPMSTmpLR,TPMSTmpRR");
+                        "TPMSTmpLF,TPMSTmpRF,TPMSTmpLR,TPMSTmpRR", kBulkBufBytes);
                     xSemaphoreGive(sdMutex);
-                    if (ok) { snapshotNoteOpen(name);
+                    if (ok) { snapshotNoteOpen(name); setActive(1, canFile.name());
                               logFileCount++; canHdr=true; flushCan=0; canErr=false;
                               Serial.printf("📝 SD CAN: %s\n", name); }
                 }
@@ -1217,9 +1887,9 @@ void sdLogTask(void*) {
                 if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                     uniqueLogName(name, sizeof(name), "imu", sessionStamp);
                     bool ok = openFile(imuFile, name,
-                        "unix_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps");
+                        "unix_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps", kBulkBufBytes);
                     xSemaphoreGive(sdMutex);
-                    if (ok) { snapshotNoteOpen(name);
+                    if (ok) { snapshotNoteOpen(name); setActive(2, imuFile.name());
                               logFileCount++; imuHdr=true; flushImu=0;
                               Serial.printf("📝 SD IMU: %s\n", name); }
                 }
@@ -1227,12 +1897,36 @@ void sdLogTask(void*) {
             if (logSat && !satFile) {
                 if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                     uniqueLogName(name, sizeof(name), "sat", sessionStamp);
-                    bool ok = openFile(satFile, name, "unix_ms,nmea_sentence");
+                    bool ok = openFile(satFile, name, "unix_ms,nmea_sentence", kBulkBufBytes);
                     xSemaphoreGive(sdMutex);
-                    if (ok) { snapshotNoteOpen(name);
+                    if (ok) { snapshotNoteOpen(name); setActive(3, satFile.name());
                               logFileCount++; satHdr=true; flushSat=0;
                               Serial.printf("📝 SD SAT: %s\n", name); }
                 }
+            }
+            if (logNmea && !nmeaFile) {
+                if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    uniqueLogName(name, sizeof(name), "nmea", sessionStamp);
+                    bool ok = openFile(nmeaFile, name, "unix_ms,nmea_sentence", kBulkBufBytes);
+                    xSemaphoreGive(sdMutex);
+                    if (ok) { snapshotNoteOpen(name); setActive(4, nmeaFile.name());
+                              logFileCount++; flushNmea=0;
+                              Serial.printf("📝 SD NMEA (raw receiver capture): %s\n", name); }
+                }
+            }
+        }
+
+        // Recovery is done once every enabled channel has a file again; until
+        // then, retry on the short cadence (the card may still be failing).
+        if (recovering && canOpen) {
+            const bool allOpen = (!logGps || gpsFile) && (!logCan || canFile) &&
+                                 (!logImu || imuFile) && (!logSat || satFile) &&
+                                 (!logNmea || nmeaFile);
+            if (allOpen) {
+                recovering = false;
+                Serial.printf("✅ SD: all channels recording again (session %s)\n", sessionStamp);
+            } else {
+                recoverAt = millis() + recoverDelay;
             }
         }
 
@@ -1241,13 +1935,23 @@ void sdLogTask(void*) {
         if (!logCan && canFile) { closeFile(canFile, sdMutex); canHdr=false; }
         if (!logImu && imuFile) { closeFile(imuFile, sdMutex); imuHdr=false; }
         if (!logSat && satFile) { closeFile(satFile, sdMutex); satHdr=false; }
+        if (!logNmea && nmeaFile) closeFile(nmeaFile, sdMutex);
 
         // ── Build UTC string ───────────────────────────────────────────────
+        // One pass writes every GPS epoch that has queued, not just the one it woke for. Each pass
+        // also drains the raw, IMU, CAN, NMEA and SAT queues first, and with the card busy that
+        // can take well over the 50 ms epoch period; one row per pass would then cap the GPS log
+        // at the pass rate and overflow the epoch queue while every other channel stayed lossless.
+        // The cap bounds one pass to the queue depth. Files are already open for the first record,
+        // so the later ones only need the row write.
+        bool haveRec = true;
+        for (int gpsRows = 0; haveRec; ) {
         char utc[24] = "--:--:--.---";
         if (rec.valid && rec.year >= 2024 && rec.year <= 2050)
             snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02u.%03u",
                      rec.year, rec.mon, rec.day, rec.hr, rec.min, rec.sec, rec.msec);
 
+        crumb::mark(crumb::SLOT_SDLOG, crumb::S_GPS);
         // ── Write GPS record ───────────────────────────────────────────────
         // Thermal threshold 4 (thermal.h) caps this row's SD write at 1 Hz —
         // GPS is the last channel still logging by that point, so it's the
@@ -1264,15 +1968,23 @@ void sdLogTask(void*) {
             // fmtF emits "" for NAN, so a cold-start/sensor-fault cell is blank.
             char espT[8];
             fmtF(espT, sizeof(espT), cToF(rec.espTempC), 1);
-            char row[480];
+            // Speed/heading are blank when gnss.cpp had no current value (neither a
+            // receiver velocity nor a usable RTK track) — never a held one.
+            char spdS[12], hdgS[12], tSpdS[12], tHdgS[12];
+            fmtF(spdS,  sizeof(spdS),  rec.speedMph,      2);
+            fmtF(hdgS,  sizeof(hdgS),  rec.headingDeg,    1);
+            fmtF(tSpdS, sizeof(tSpdS), rec.trkSpeedMph,   2);
+            fmtF(tHdgS, sizeof(tHdgS), rec.trkHeadingDeg, 1);
+            char row[512];
             snprintf(row, sizeof(row),
                 "%llu,%s,"
-                "%.9f,%.9f,%.2f,%.2f,%.2f,%.1f,"
+                "%.9f,%.9f,%.2f,%.2f,%s,%s,"
                 "%.3f,%.3f,%d,%u,%d,%d,"
                 "%d,%s,%.1f,%d,%d,%lu,"
-                "%s,%u,%.2f,%.2f,%.2f,%s,%.1f,%u,%lu,%lu",
+                "%s,%u,%.2f,%.2f,%.2f,%s,%.1f,%u,%lu,%lu,"
+                "%u,%s,%s",
                 (unsigned long long)toUnixMs(rec.ms), utc,
-                rec.lat, rec.lon, rec.altMSL, rec.geoidSepM, rec.speedMph, rec.headingDeg,
+                rec.lat, rec.lon, rec.altMSL, rec.geoidSepM, spdS, hdgS,
                 rec.hAccM, rec.vAccM, (int)rec.rtkType, (unsigned)rec.staId,
                 (int)rec.numSV, (int)rec.epeValid,
                 (int)rec.ntripConn, mpt, rec.ntripKm, (int)rec.carrier, (int)rec.vrs,
@@ -1280,108 +1992,22 @@ void sdLogTask(void*) {
                 espT, (unsigned)rec.spdAgeMs,
                 rec.pdop, rec.hdop, rec.vdop, rec.gsaSats, rec.diffAgeS,
                 (unsigned)rec.bleState, (unsigned long)rec.bleDlv,
-                (unsigned long)rec.bleSup);
+                (unsigned long)rec.bleSup,
+                (unsigned)rec.velSrc, tSpdS, tHdgS);
             if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (!printlnRetry(gpsFile, row)) {
+                if (!printlnCounted(gpsFile, row, rowsGps)) {
                     gpsErr = true; Serial.println("❌ SD GPS: write failed");
-                } else if (++flushGps >= 10) { gpsFile.flush(); flushGps = 0; }
+                } else if (millis() - flushGps >= 1000) { gpsFile.flush(); flushGps = millis(); }
                 xSemaphoreGive(sdMutex);
             }
             if (gpsErr) {
-                closeFile(gpsFile, sdMutex); gpsHdr=false; gpsErr=false;
-                activeLogName[0]='\0'; sessionStamp[0]='\0'; 
-                Serial.println("⚠️  SD GPS: recovering");
+                gpsHdr = false; gpsErr = false; activeLogName[0] = '\0';
+                failChannel(gpsFile, "GPS");   // keeps sessionStamp — see failChannel
             }
         }
-
-        // ── Write CAN record ───────────────────────────────────────────────
-        // Thermal threshold 3 (thermal.h) pauses this entirely at ≥112°C.
-        // Independent of that: while the bus reads silent (canHz==0, vehicle
-        // off) the SD row rate drops to once every CAN_IDLE_LOG_MS — the BLE
-        // stream is untouched, it reads can.* directly and doesn't go through
-        // this queue at all.
-        static uint32_t lastCanWriteMs = 0;
-        bool canIdle = rec.canHz <= 0.0f;
-        bool writeCanNow = !canIdle || lastCanWriteMs == 0 ||
-                           (millis() - lastCanWriteMs) >= CAN_IDLE_LOG_MS;
-        if (canFile && logCan && writeCanNow && !thermal_satCanImuInhibit()) {
-            lastCanWriteMs = millis();
-            char rpm[10],tps[8],ped[8],tqt[8],tqa[8],veh[8],ect[8],oilT[8],oilP[8],brk[8];
-            char brSw[4],brSw2[4],wlf[8],wrf[8],wlr[8],wrr[8],st[8],sr[8];
-            char fuel[8],kick[4],baro[8],fuelT[8],engT[8],gear[4],pdkRaw[8],pdkSel[8];
-            char iat[8],map[8],maf[10],latG[10],longG[10],canYaw[10],clutch[8];
-            char outside[8],odo[12],drive[5],psm[5],pdkState[5],pdkFault[5];
-            char tpLF[8],tpRF[8],tpLR[8],tpRR[8],ttLF[8],ttRF[8],ttLR[8],ttRR[8];
-            fmtF(rpm,   sizeof(rpm),   rec.rpm,          0);
-            fmtF(tps,   sizeof(tps),   rec.tpsActual,    1);
-            fmtF(ped,   sizeof(ped),   rec.pedalReq,     1);
-            fmtF(tqt,   sizeof(tqt),   rec.targetTorque, 1);
-            fmtF(tqa,   sizeof(tqa),   rec.actualTorque, 1);
-            fmtF(veh,   sizeof(veh),   kphToMph(rec.vehicleSpeedKph), 1);
-            fmtF(ect,   sizeof(ect),   cToF(rec.coolantC), 1);
-            fmtF(oilT,  sizeof(oilT),  cToF(rec.oilC), 1);
-            fmtF(oilP,  sizeof(oilP),  barToPsi(rec.oilBar), 2);
-            fmtF(brk,   sizeof(brk),   barToPsi(rec.brakeBar), 1);
-            fmtF(brSw,  sizeof(brSw),  rec.brakeSwitch,  0);
-            fmtF(brSw2, sizeof(brSw2), rec.brakeSwitch2, 0);
-            fmtF(wlf,   sizeof(wlf),   kphToMph(rec.wsFL), 1);
-            fmtF(wrf,   sizeof(wrf),   kphToMph(rec.wsFR), 1);
-            fmtF(wlr,   sizeof(wlr),   kphToMph(rec.wsRL), 1);
-            fmtF(wrr,   sizeof(wrr),   kphToMph(rec.wsRR), 1);
-            fmtF(st,    sizeof(st),    rec.steerDeg,     1);
-            fmtF(sr,    sizeof(sr),    rec.steerRate,    1);
-            fmtF(fuel,  sizeof(fuel),  rec.fuelLevel,    1);
-            fmtF(kick,  sizeof(kick),  rec.kickdown,     0);
-            fmtF(baro,  sizeof(baro),  kpaToPsi(rec.atmosphericKpa), 2);
-            fmtF(fuelT, sizeof(fuelT), cToF(rec.fuelTempC), 1);
-            fmtF(engT,  sizeof(engT),  cToF(rec.engineTempC), 1);
-            if (rec.is718 && !rec.gearValid718) gear[0] = '\0';
-            else snprintf(gear, sizeof(gear), "%u", (unsigned)rec.gear);
-            fmtF(pdkRaw, sizeof(pdkRaw), rec.pdkGearRaw, 0);
-            fmtF(pdkSel, sizeof(pdkSel), rec.pdkSelectorRaw, 0);
-
-            fmtF(iat,      sizeof(iat),      cToF(rec.intakeAirTempC), 1);
-            fmtF(map,      sizeof(map),      barToPsi(rec.manifoldAbsPressureBar), 2);
-            fmtF(maf,      sizeof(maf),      rec.massAirFlowGps, 1);
-            fmtF(latG,     sizeof(latG),     rec.canLateralAccelG, 3);
-            fmtF(longG,    sizeof(longG),    rec.canLongitudinalAccelG, 3);
-            fmtF(canYaw,   sizeof(canYaw),   rec.canYawRateDegPerSec, 1);
-            fmtF(clutch,   sizeof(clutch),   rec.clutchPositionPercent, 1);
-            fmtF(outside,  sizeof(outside),  cToF(rec.outsideTempC), 1);
-            fmtF(odo,      sizeof(odo),      isnan(rec.odometerKm) ? NAN : rec.odometerKm * 0.621371f, 1);
-            fmtF(drive,    sizeof(drive),    rec.driveMode, 0);
-            fmtF(psm,      sizeof(psm),      rec.psmMode, 0);
-            fmtF(pdkState, sizeof(pdkState), rec.pdkState, 0);
-            fmtF(pdkFault, sizeof(pdkFault), rec.pdkNoDriveOrFault, 0);
-            fmtF(tpLF,     sizeof(tpLF),     rec.tpmsFrontLeftPsi, 1);
-            fmtF(tpRF,     sizeof(tpRF),     rec.tpmsFrontRightPsi, 1);
-            fmtF(tpLR,     sizeof(tpLR),     rec.tpmsRearLeftPsi, 1);
-            fmtF(tpRR,     sizeof(tpRR),     rec.tpmsRearRightPsi, 1);
-            fmtF(ttLF,     sizeof(ttLF),     cToF(rec.tpmsTempFrontLeftC), 1);
-            fmtF(ttRF,     sizeof(ttRF),     cToF(rec.tpmsTempFrontRightC), 1);
-            fmtF(ttLR,     sizeof(ttLR),     cToF(rec.tpmsTempRearLeftC), 1);
-            fmtF(ttRR,     sizeof(ttRR),     cToF(rec.tpmsTempRearRightC), 1);
-
-            char row[768];
-            snprintf(row, sizeof(row),
-                "%llu,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
-                (unsigned long long)toUnixMs(rec.ms), utc,
-                rpm, tps, ped, tqt, tqa, veh, ect, oilT, oilP, brk, brSw, brSw2,
-                wlf, wrf, wlr, wrr, st, sr, fuel, kick, baro, fuelT, engT, gear, pdkRaw, pdkSel,
-                iat, map, maf, latG, longG, canYaw, clutch, outside, odo, drive, psm,
-                pdkState, pdkFault, tpLF, tpRF, tpLR, tpRR, ttLF, ttRF, ttLR, ttRR);
-            if (sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (!printlnRetry(canFile, row)) {
-                    canErr = true; Serial.println("❌ SD CAN: write failed");
-                } else if (++flushCan >= 10) { canFile.flush(); flushCan = 0; }
-                xSemaphoreGive(sdMutex);
-            }
-            if (canErr) {
-                closeFile(canFile, sdMutex); canHdr=false; canErr=false;
-                Serial.println("⚠️  SD CAN: recovering");
-            }
+        haveRec = (++gpsRows < 64) && xQueueReceive(logQueue, &rec, 0) == pdTRUE;
         }
+
     }
 }
 
@@ -1394,7 +2020,7 @@ void sdLogTask(void*) {
 // .bss (~90 B each) as FreeRTOS accesses them in critical sections.
 // If PSRAM allocation fails (no PSRAM / exhausted) we fall back to a normal
 // internal-RAM queue so logging still works.
-static StaticQueue_t logQueueCtrl, imuQueueCtrl, satQueueCtrl, canRawQueueCtrl;
+static StaticQueue_t logQueueCtrl, imuQueueCtrl, satQueueCtrl, canRawQueueCtrl, canQueueCtrl, nmeaQueueCtrl;
 
 static QueueHandle_t createQueuePreferPsram(int len, int itemSz,
                                             StaticQueue_t* ctrl, const char* name) {
@@ -1411,6 +2037,14 @@ static QueueHandle_t createQueuePreferPsram(int len, int itemSz,
     Serial.printf("⚠️  SD: %s queue using internal RAM (PSRAM unavailable)\n", name);
     return xQueueCreate(len, itemSz);
 }
+
+// Borrowed by debug_log (serial-to-SD mirror): the mirror file is written under the same SD
+// mutex as the data logs, and named from the same session stamp so it sorts beside its run.
+bool sdlog_takeMutex(uint32_t ms) {
+    return sdMutex && xSemaphoreTake(sdMutex, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+void sdlog_giveMutex() { if (sdMutex) xSemaphoreGive(sdMutex); }
+const char* sdlog_sessionStamp() { return pubStamp; }
 
 void sdlog_init() {
     setenv("TZ", "UTC0", 1); tzset();   // GPS time is UTC; make mktime() interpret it as UTC
@@ -1441,13 +2075,21 @@ void sdlog_init() {
     }
     logQueue = createQueuePreferPsram(60,  sizeof(LogRecord),    &logQueueCtrl, "GPS+CAN");
     if (!logQueue) { Serial.println("⚠️  SD: GPS queue alloc failed"); return; }
-    imuQueue = createQueuePreferPsram(120, sizeof(ImuLogRecord), &imuQueueCtrl, "IMU");
+    // 1024 rows is about 4 s at the active IMU rate, enough to ride out a card garbage-collection pause.
+    imuQueue = createQueuePreferPsram(psramRoomy() ? 1024 : 120, sizeof(ImuLogRecord), &imuQueueCtrl, "IMU");
     if (!imuQueue) { Serial.println("⚠️  SD: IMU queue alloc failed"); return; }
-    satQueue = createQueuePreferPsram(30,  sizeof(SatLogRecord), &satQueueCtrl, "SAT");
+    // Decoded CAN snapshots (one LogRecord each): 256 rows is 5 s at the active rate.
+    canQueue = createQueuePreferPsram(psramRoomy() ? 256 : 16, sizeof(LogRecord), &canQueueCtrl, "CAN");
+    if (!canQueue) { Serial.println("⚠️  SD: CAN queue alloc failed"); return; }
+    satQueue = createQueuePreferPsram(psramRoomy() ? 120 : 30, sizeof(SatLogRecord), &satQueueCtrl, "SAT");   // a ~26-sentence GSV burst plus an 800 ms card pause
     if (!satQueue) { Serial.println("⚠️  SD: SAT queue alloc failed"); return; }
-    // Raw CAN sniffer queue — deep (2048×16B=32KB PSRAM) to ride out SD write
-    // stalls at full bus rate. Drop-on-full keeps the CAN task real-time.
-    canRawQueue = createQueuePreferPsram(2048, sizeof(CanRawRecord), &canRawQueueCtrl, "CANraw");
+    // Raw receiver capture: GGA+RMC at 20 Hz is 40 lines/s; 80 slots is two
+    // seconds of card stall. Created always (PSRAM), used only when switched on.
+    nmeaQueue = createQueuePreferPsram(80, sizeof(NmeaLogRecord), &nmeaQueueCtrl, "NMEA");
+    // Raw CAN sniffer queue — deep (16384×16B=256KB PSRAM) to ride out SD write
+    // stalls (card garbage-collection pauses of ~0.8 s) at a busy bus rate. Drop-on-full
+    // keeps the CAN task real-time. 2048 rows when PSRAM is unavailable.
+    canRawQueue = createQueuePreferPsram(psramRoomy() ? 16384 : 2048, sizeof(CanRawRecord), &canRawQueueCtrl, "CANraw");
     
     // 12288: the boot directory scan runs in THIS task (moved off the async_tcp
     // callback, which was overrunning the Task-WDT). Its entry table is heap-
@@ -1463,22 +2105,32 @@ void sdlog_init() {
 SemaphoreHandle_t sdlog_getMutex()      { return sdMutex; }
 bool              sdlog_isReady()       { return sdReady; }
 const char* sdlog_getActiveName() { return activeLogName; }
-uint32_t          sdlog_getFileCount()  { return logFileCount; }
+// Log files on the card (.csv, as the Log Files page lists them), from the RAM
+// snapshot: the boot scan plus every file opened since, minus deletions. Counting
+// only this boot's opens (logFileCount) read as "files on the card" and was not.
+uint32_t          sdlog_getFileCount()  { return (uint32_t)dirSnapCount; }
+uint32_t          sdlog_getWriteFaults() { return sdWriteFaults; }
 uint32_t          sdlog_getActiveGpsSize() { return activeBytesByType[0]; }  // open GPS log bytes
 
 // Copies the currently-open ("active") filenames + live sizes into caller buffers.
 // Pure RAM read under a short critical section — performs NO SD access. Returns
-// the count (0..4). Backs every web file view so open/growing files always appear
+// the count (0..5). Backs every web file view so open/growing files always appear
 // instantly, independent of the directory scan. `sizes` may be null.
 int sdlog_getActiveFiles(char names[][LOG_NAME_MAX], uint32_t* sizes, int cap) {
     int n = 0;
     taskENTER_CRITICAL(&activeMux);
-    for (int t = 0; t < 4 && n < cap; t++)
+    for (int t = 0; t < 5 && n < cap; t++)
         if (activeByType[t][0]) {
             memcpy(names[n], activeByType[t], 32);
             if (sizes) sizes[n] = activeBytesByType[t];
             n++;
         }
+    // The serial mirror is an open file like the channels, so the open-file view lists it too.
+    if (n < cap && debugFileName[0]) {
+        memcpy(names[n], debugFileName, 32);
+        if (sizes) sizes[n] = debugFileBytes;
+        n++;
+    }
     taskEXIT_CRITICAL(&activeMux);
     return n;
 }
@@ -1491,9 +2143,10 @@ bool sdlog_isActiveFile(const char* bare) {
     if (!bare || !bare[0]) return false;
     bool match = false;
     taskENTER_CRITICAL(&activeMux);
-    for (int t = 0; t < 4; t++)
+    for (int t = 0; t < 5; t++)
         if (activeByType[t][0] && strncmp(activeByType[t], bare, 32) == 0) { match = true; break; }
     if (!match && canRawName[0] && strncmp(canRawName, bare, 32) == 0) match = true;
+    if (!match && debugFileName[0] && strncmp(debugFileName, bare, 32) == 0) match = true;
     taskEXIT_CRITICAL(&activeMux);
     return match;
 }
@@ -1547,7 +2200,7 @@ void sdlog_getCapacity(uint64_t* total, uint64_t* used) {
 }
 
 // ── Bulk export accessors ─────────────────────────────────────────────────────
-void sdlog_requestExport(const char* namesCSV) {
+void sdlog_requestExport(const char* namesCSV, const char* archiveName) {
     // Parse and validate BEFORE flipping to BUILDING, so a malformed request
     // can't leave a stale selection from a previous call mixed with a partial
     // new one. Same validation as the batch-delete route: root .csv only, no
@@ -1563,7 +2216,7 @@ void sdlog_requestExport(const char* namesCSV) {
             if (n > 0 && n < LOG_NAME_MAX) {
                 char cand[LOG_NAME_MAX];
                 memcpy(cand, namesCSV + start, n); cand[n] = '\0';
-                if (strstr(cand, ".csv") == cand + n - 4 &&
+                if (sdlog_isLogFileName(cand) &&
                     !strchr(cand, '/') && !strchr(cand, '\\')) {
                     memcpy(exportSelectNames[exportSelectCount], cand, n + 1);
                     exportSelectCount++;
@@ -1575,14 +2228,21 @@ void sdlog_requestExport(const char* namesCSV) {
     }
     // Flip to BUILDING immediately so a status poll right after the POST already
     // reports progress, even before sdLogTask picks up the request.
-    if (exportState != EXP_BUILDING) { exportState = EXP_BUILDING; exportReq = true; }
+    if (exportState != EXP_BUILDING) {
+        // The name reaches SD_MMC.open() and the listing, so it is checked here as well as in the web
+        // handler: a bare root .tar name or the default for this kind of export.
+        const bool nameOk = archiveName && sdlog_isArchiveName(archiveName);
+        snprintf(exportPath, sizeof(exportPath), "/%s",
+                 nameOk ? archiveName : (exportIsSubset ? "rcx_logs_sel.tar" : "rcx_logs_all.tar"));
+        exportState = EXP_BUILDING; exportReq = true;
+    }
 }
 void sdlog_getExportState(int* state, uint64_t* size, int* count) {
     if (state) *state = exportState;
     if (size)  *size  = exportSize;
     if (count) *count = exportCount;
 }
-const char* sdlog_getExportPath() { return EXPORT_PATH; }
+const char* sdlog_getExportPath() { return exportPath; }
 bool sdlog_exportIsSubset() { return exportIsSubset; }
 
 // These report the operator's INTENDED set, so the dashboard's channel toggles
@@ -1592,6 +2252,14 @@ bool sdlog_getLogGps() { return wantGps; }
 bool sdlog_getLogImu() { return wantImu; }
 bool sdlog_getLogCan() { return wantCan; }
 bool sdlog_getLogSat() { return wantSat; }
+bool sdlog_getLogNmea() { return wantNmea; }
+
+void sdlog_setLogNmea(bool on) {
+    wantNmea = on;
+    if (!logPaused) logNmea = on;    // while paused it lands on resume, like the others
+    saveLogConfig();
+    Serial.printf("👤 USER [%lus]: raw receiver capture %s%s\n", (unsigned long)(millis() / 1000UL), on ? "ON" : "OFF", logPaused ? " (applies on resume)" : "");
+}
 
 bool sdlog_isPaused() { return logPaused; }
 
@@ -1601,12 +2269,12 @@ void sdlog_setPaused(bool paused) {
     if (paused) {
         // Clearing the effective flags is what makes sdLogTask flush and close
         // each open file on its next pass; nothing is written to NVS.
-        logGps = false; logImu = false; logCan = false; logSat = false;
-        Serial.println("📝 Log PAUSED — channels closed, files released");
+        logGps = false; logImu = false; logCan = false; logSat = false; logNmea = false;
+        RCX_USER_ACTION("log PAUSED — channels closed, files released");
     } else {
-        logGps = wantGps; logImu = wantImu; logCan = wantCan; logSat = wantSat;
-        Serial.printf("📝 Log RESUMED: GPS=%d IMU=%d CAN=%d SAT=%d\n",
-                      wantGps, wantImu, wantCan, wantSat);
+        logGps = wantGps; logImu = wantImu; logCan = wantCan; logSat = wantSat; logNmea = wantNmea;
+        Serial.printf("👤 USER [%lus]: log RESUMED GPS=%d IMU=%d CAN=%d SAT=%d\n",
+                      (unsigned long)(millis() / 1000UL), wantGps, wantImu, wantCan, wantSat);
     }
 }
 
@@ -1617,24 +2285,38 @@ void sdlog_setConfig(bool gps, bool imu, bool can, bool sat) {
     // and resume would then overwrite the choice they just made.
     if (!logPaused) { logGps = gps; logImu = imu; logCan = can; logSat = sat; }
     saveLogConfig();
-    Serial.printf("📝 Log config: GPS=%d IMU=%d CAN=%d SAT=%d%s\n",
-                  gps, imu, can, sat, logPaused ? " (applies on resume)" : "");
+    Serial.printf("👤 USER [%lus]: log config GPS=%d IMU=%d CAN=%d SAT=%d%s\n",
+                  (unsigned long)(millis() / 1000UL), gps, imu, can, sat, logPaused ? " (applies on resume)" : "");
 }
 
 #else
 void sdlog_init()        {}
 void sdlog_push_if_new() {}
 void sdlog_push_imu(float,float,float,float,float,float) {}
+void sdlog_push_can() {}
+bool sdlog_carActive() { return true; }
 void sdlog_push_sat(const char*) {}
+bool sdlog_getLogNmea() { return false; }
+void sdlog_setLogNmea(bool) {}
+void sdlog_push_nmea(const char*) {}
 void sdLogTask(void*)    {}
 SemaphoreHandle_t sdlog_getMutex()      { return nullptr; }
 bool              sdlog_isReady()       { return false; }
 const char* sdlog_getActiveName() { return ""; }
 uint32_t          sdlog_getFileCount()  { return 0; }
+uint32_t          sdlog_getWriteFaults() { return 0; }
 uint32_t          sdlog_getActiveGpsSize() { return 0; }
 int  sdlog_getActiveFiles(char[][LOG_NAME_MAX], uint32_t*, int) { return 0; }
 bool sdlog_isActiveFile(const char*) { return false; }
 void sdlog_noteFileDeleted(const char*) {}
+void sdlog_noteDebugFileOpen(const char*) {}
+bool sdlog_takeMutex(uint32_t) { return false; }
+void sdlog_giveMutex() {}
+const char* sdlog_sessionStamp() { return ""; }
+void sdlog_noteDebugFileClosed(const char*, uint32_t) {}
+void sdlog_noteDebugFileSize(uint32_t) {}
+bool sdlog_isLogFileName(const char*) { return false; }
+bool sdlog_isArchiveName(const char*) { return false; }
 bool sdlog_dirScanPending() { return false; }
 int  sdlog_getDirSnapshot(char[][LOG_NAME_MAX], uint32_t*, int, bool* t, uint32_t* g) {
     if (t) *t = false; if (g) *g = 0; return 0;
@@ -1643,14 +2325,16 @@ int  sdlog_getDirSnapshotPage(char[][LOG_NAME_MAX], uint32_t*, int, int, int* n,
     if (n) *n = 0; if (t) *t = false; if (g) *g = 0; return 0;
 }
 bool sdlog_isPaused() { return false; }
+bool sdlog_downloadInProgress() { return false; }
 void sdlog_setPaused(bool) {}
 void sdlog_getCapacity(uint64_t* t, uint64_t* u) { if (t) *t = 0; if (u) *u = 0; }
-void sdlog_requestExport(const char*) {}
+void sdlog_requestExport(const char*, const char*) {}
 void sdlog_getExportState(int* s, uint64_t* sz, int* c) { if (s) *s = 0; if (sz) *sz = 0; if (c) *c = 0; }
-const char* sdlog_getExportPath() { return "/export.tar"; }
+const char* sdlog_getExportPath() { return "/rcx_logs_all.tar"; }
 bool sdlog_exportIsSubset() { return false; }
 void sdlog_push_can_raw(uint32_t, uint16_t, uint8_t, const uint8_t*) {}
 uint32_t sdlog_getCanRawDrops() { return 0; }
+uint32_t sdlog_getGpsRowDrops() { return 0; }
 bool sdlog_getLogGps() { return false; }
 bool sdlog_getLogImu() { return false; }
 bool sdlog_getLogCan() { return false; }

@@ -4,25 +4,19 @@
 #if defined(DEBUG_SERIAL_TO_SD) && DEBUG_SERIAL_TO_SD
 
 // The `Serial` macro from debug_log.h would rewrite our own Serial.* calls in
-// this file too — we need the REAL Serial here (the tee mirrors to it). Include
-// the header for the class decl, then undo the macro for this translation unit.
+// this file too — this file needs the REAL Serial, since the tee mirrors to it.
 //
-// A bare #undef is NOT enough on its own, and this was a latent bug until now:
-// on USB-CDC-on-boot builds (this board's config), the ESP32 core itself binds
-// `Serial` via ITS OWN macro (Serial -> USBSerial) — it's not a plain global in
-// that mode. #undef only removes debug_log.h's override; it can't restore
-// whatever `Serial` meant before that, because #undef has no memory of a prior
-// definition, it just deletes the current one. Left as a bare #undef, every
-// Serial.* call below (including the real hardware write in DebugTee::write())
-// would fail to compile with "not declared in this scope" the moment this file
-// is actually built with DEBUG_SERIAL_TO_SD on — so re-bind it explicitly here,
-// using the same ARDUINO_USB_CDC_ON_BOOT check debug_log.h already uses for
-// setTxTimeoutMs() above.
+// What "real Serial" means is decided by the core, not by this file: Arduino.h
+// binds `Serial` through a macro to HWCDCSerial (USB-Serial/JTAG), USBSerial
+// (native TinyUSB CDC) or Serial0 (UART0), depending on the board's USB mode.
+// A bare #undef cannot restore it, and hard-coding one of those names breaks
+// the other modes. So the core's own definition is saved before debug_log.h
+// replaces it and restored afterwards, whichever device it names.
+#include <Arduino.h>
+#pragma push_macro("Serial")
 #include "debug_log.h"
 #undef Serial
-#if ARDUINO_USB_CDC_ON_BOOT
-#define Serial USBSerial
-#endif
+#pragma pop_macro("Serial")
 
 #include "sd_log.h"      // sdMutex ownership lives in sd_log; we borrow the accessor
 #include <SD_MMC.h>
@@ -43,6 +37,7 @@ static volatile uint32_t s_dropped = 0;          // bytes lost to a full ring
 
 static File     s_file;
 static bool     s_open   = false;
+static uint32_t s_retryAt = 0;        // reopen no sooner than this after a failed write (0 = now)
 static bool     s_armed  = false;
 static uint32_t s_lastFlush = 0;
 static uint32_t s_reportedDrops = 0;
@@ -51,12 +46,15 @@ static uint32_t s_reportedDrops = 0;
 // stamp). Written only by drainToFile on sdLogTask; read by the web task —
 // a torn read would at worst render one stale link, so no lock is warranted.
 static char     s_name[40] = "";
+// Name already announced to the file listing, so a reopen after a failed write (same name,
+// appended) is not listed twice.
+static char     s_noted[40] = "";
 
 static inline void ringPut(uint8_t b) {
     size_t h = s_head;
     size_t next = (h + 1) & (RING_SZ - 1);
     // Full if advancing head would collide with tail. Drop the byte (don't block).
-    if (next == (s_tail & (RING_SZ - 1))) { s_dropped++; return; }
+    if (next == (s_tail & (RING_SZ - 1))) { s_dropped = s_dropped + 1; return; }
     s_ring[h & (RING_SZ - 1)] = b;
     s_head = next;
 }
@@ -130,8 +128,11 @@ void setEnabled(bool on) {
 
 void closeFile() {
     if (s_open && sdlog_takeMutex(200)) {
-        s_file.flush(); s_file.close(); s_open = false;
-        s_name[0] = '\0';
+        s_file.flush();
+        const uint32_t finalSize = (uint32_t)s_file.size();
+        s_file.close(); s_open = false;
+        sdlog_noteDebugFileClosed(s_name, finalSize);   // listed with its size, deletable again
+        s_name[0] = '\0'; s_noted[0] = '\0';
         sdlog_giveMutex();
     }
 }
@@ -147,22 +148,43 @@ const char* currentFileName() { return s_name; }
 // stamp exists), drains the ring under sdMutex, and flushes at most ~1 Hz so the
 // debug file never becomes its own source of flush-stall jitter.
 void drainToFile() {
-    if (!s_armed) return;
+    if (!s_armed) {
+        // Switched off from the web page: finish the file so it is closed, complete and deletable.
+        if (s_open && !sdlog_downloadInProgress()) closeFile();
+        return;
+    }
+    // PROTECTIVE NOTE: no card writes while a download streams. Pausing logging stops every
+    // log channel but not this mirror, so a download of any file — this one included — would
+    // otherwise share the FatFs volume with a writer, the contention that freezes the web
+    // server (see the /log/<file> route). Text keeps collecting in the RAM ring meanwhile; a
+    // long download overflows it, and the gap is written into the file as a dropped-bytes note.
+    if (sdlog_downloadInProgress()) return;
 
     // Lazy open: reuse the logger's session stamp so the debug file sorts next to
     // its run's data files. Before a GPS fix, sdlog_sessionStamp() returns "".
     if (!s_open) {
+        // After a failed write, wait before reopening: a card that keeps failing
+        // would otherwise be reopened on every sdLogTask pass.
+        if (s_retryAt && (int32_t)(millis() - s_retryAt) < 0) return;
+        s_retryAt = 0;
         const char* stamp = sdlog_sessionStamp();
         if (!stamp || !stamp[0]) return;         // wait for a stamp; ring keeps filling
         char name[40];
         snprintf(name, sizeof(name), "/debug_%s.txt", stamp);
         if (!sdlog_takeMutex(200)) return;
-        s_file = SD_MMC.open(name, FILE_WRITE);
+        // Append, never truncate: this name is reopened within the same session
+        // after a failed write (below), and "w" would erase what was already
+        // captured — the very lines that explain the failure.
+        s_file = SD_MMC.open(name, FILE_APPEND);
         if (s_file) { s_open = true; }
         sdlog_giveMutex();
         if (!s_open) return;
         strncpy(s_name, name + 1, sizeof(s_name) - 1);   // store bare, no leading '/'
         s_name[sizeof(s_name) - 1] = '\0';
+        if (strcmp(s_noted, s_name) != 0) {              // list it and protect it from a web delete while open
+            sdlog_noteDebugFileOpen(s_name);
+            strncpy(s_noted, s_name, sizeof(s_noted) - 1); s_noted[sizeof(s_noted) - 1] = '\0';
+        }
         Serial.printf("📝 SD DEBUG: serial mirror → %s\n", name);
     }
 
@@ -173,9 +195,18 @@ void drainToFile() {
 
     if (!sdlog_takeMutex(50)) return;            // brief; skip this pass if busy
     int budget = 2048;
+    bool failed = false;
     while ((s_tail & (RING_SZ - 1)) != h && budget-- > 0) {
-        s_file.write(s_ring[s_tail & (RING_SZ - 1)]);
+        if (s_file.write(s_ring[s_tail & (RING_SZ - 1)]) == 0) { failed = true; break; }
         s_tail++;
+    }
+    if (failed) {
+        // A failed write leaves the FatFs handle in a sticky error state (see
+        // sd_log.cpp failChannel): close it; the next pass reopens in append mode.
+        s_file.close(); s_open = false;
+        s_retryAt = (millis() + 5000) | 1;       // never 0 (0 = no wait)
+        sdlog_giveMutex();
+        return;
     }
     // Note any bytes lost to ring overflow, so gaps in the file are explained.
     if (s_dropped != s_reportedDrops) {
@@ -186,7 +217,7 @@ void drainToFile() {
         s_file.write((const uint8_t*)note, m);
         s_reportedDrops = s_dropped;
     }
-    if (millis() - s_lastFlush >= 1000) { s_file.flush(); s_lastFlush = millis(); }
+    if (millis() - s_lastFlush >= 1000) { s_file.flush(); s_lastFlush = millis(); sdlog_noteDebugFileSize((uint32_t)s_file.size()); }
     sdlog_giveMutex();
 }
 

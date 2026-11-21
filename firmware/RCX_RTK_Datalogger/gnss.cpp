@@ -14,6 +14,11 @@
 #include <Preferences.h>
 #include "debug_log.h"   // LAST include: serial-to-SD tee macro must not touch library headers above
 
+// GNSS UART TX lock: RTCM forwarding vs runtime commands (see gnss_forwardRtcm).
+// Created in gnss_init(), from setup(), before any task that writes the port.
+static SemaphoreHandle_t s_txMutex = nullptr;
+static HardwareSerial*   s_txPort  = nullptr;   // the GNSS UART, recorded by gnss_init()
+
 // ── Module-level state ────────────────────────────────────────────────────────
 TinyGPSPlus tinygps;
 float gnss_updateRate_Hz = 0.0f;
@@ -265,15 +270,18 @@ static int gnss_readAndLogRtkHold(HardwareSerial& port) {
 // This is a PQTMCFG WRITE, so per the hot-start contract it may restart the nav engine.
 // It is therefore only issued from configureLG290P() (which already pays that cost) or
 // from the deferred web-toggle path in gnss_loop() — NEVER speculatively at boot.
-static void sendPppConfig(HardwareSerial& port, uint8_t mode) {
-    char cmd[64];
+static void buildPppConfig(char* cmd, size_t n, uint8_t mode) {
     if (mode == 0) {
-        snprintf(cmd, sizeof(cmd), "$PQTMCFGPPP,W,0");   // disable — other fields ignored
+        snprintf(cmd, n, "$PQTMCFGPPP,W,0");   // disable — other fields ignored
     } else {
-        snprintf(cmd, sizeof(cmd), "$PQTMCFGPPP,W,%u,%u,%u,%.2f,%.2f",
+        snprintf(cmd, n, "$PQTMCFGPPP,W,%u,%u,%u,%.2f,%.2f",
                  (unsigned)mode, (unsigned)GNSS_PPP_DATUM, (unsigned)GNSS_PPP_TIMEOUT_S,
                  (double)GNSS_PPP_HOR_STD_M, (double)GNSS_PPP_VER_STD_M);
     }
+}
+static void sendPppConfig(HardwareSerial& port, uint8_t mode) {
+    char cmd[64];
+    buildPppConfig(cmd, sizeof(cmd), mode);
     sendPQTM(port, cmd);
 }
 
@@ -705,6 +713,33 @@ static void handleGNGSA(const char* line) {
 // publishes that row flagged instead of a wrong seq-bump crediting stale speed.
 static bool s_rmcLineDone = false;
 
+// ── Receiver velocity fields, as sent ─────────────────────────────────────────
+// PROTECTIVE NOTE — the root of the long-running stalled speed/heading. TinyGPS++
+// (1.1.0, TinyGPS++.cpp endOfTermHandler) skips an EMPTY term but still commits
+// the sentence, and commit() copies the previous value from its scratch slot with
+// updated=true. The LG290P leaves SOG/COG empty when it has no valid velocity
+// (Protocol Spec: "this field is empty in case of an invalid value"), which it
+// does for most of a second at a time under live RTK. Through TinyGPS++ every such
+// epoch became the previous epoch's speed and heading, stamped fresh — frozen
+// values with spd_age_ms ~5 ms. So the fields are captured here, from the raw
+// checksum-valid line before TinyGPS++ sees it, and THESE decide whether this
+// epoch carries a receiver velocity. Never read speed/course back from TinyGPS++.
+static char s_rmcSog[16] = "", s_rmcCog[16] = "";     // this epoch's raw SOG/COG text
+static char s_prevSog[16] = "", s_prevCog[16] = "";   // previous epoch's, for repeat detection
+
+// ── Receiver velocity stalls: logged, never hidden ────────────────────────────
+// OPEN QUESTION, kept visible on purpose: the field stalls (runs of ~19 epochs
+// under live RTK, more with speed) are bridged with RTK-track velocity, but WHY
+// the receiver withholds velocity is not established, and the CSV logs before
+// this code could not tell an empty field from a repeated one. Every stall is
+// recorded per row in the GPS log (vel_src: 1 = fields empty, 2 = value
+// repeated) and counted every 5 s on the serial line beside the wire counters.
+// The receiver's own sentences are captured only when the operator switches on
+// the raw receiver capture (sd_log.h, debug channel) — nothing extra is written
+// to the card otherwise.
+static uint32_t s_velRx = 0, s_velEmpty = 0, s_velRepeat = 0, s_velNone = 0, s_velStalls = 0;
+static bool     s_velWasStale = false;
+
 // ── Raw NMEA line dispatcher ──────────────────────────────────────────────────
 static void handleRawNmeaLine(const char* line) {
     if (!line || line[0] != '$') return;
@@ -735,11 +770,21 @@ static void handleRawNmeaLine(const char* line) {
         const char* typ = (line[1] && line[2]) ? line + 3 : "";
         if      (strncmp(typ, "GGA", 3) == 0) {
             nGGA++;
+            sdlog_push_nmea(line);   // raw receiver capture (debug; no-op unless on)
             char q[6]="", s[6]="";
             if (ckOk && csvField(line+1, 6, q, sizeof(q)) && q[0]) lastQual = (uint8_t)atoi(q);
             if (ckOk && csvField(line+1, 7, s, sizeof(s)) && s[0]) lastSats = (uint8_t)atoi(s);
         }
-        else if (strncmp(typ, "RMC", 3) == 0) { nRMC++; if (ckOk) s_rmcLineDone = true; }
+        else if (strncmp(typ, "RMC", 3) == 0) {
+            nRMC++;
+            sdlog_push_nmea(line);   // raw receiver capture (debug; no-op unless on)
+            if (ckOk) {
+                s_rmcLineDone = true;
+                // Field 7 = SOG (knots), 8 = COG (degrees); empty = receiver says invalid.
+                if (!csvField(line + 1, 7, s_rmcSog, sizeof(s_rmcSog))) s_rmcSog[0] = '\0';
+                if (!csvField(line + 1, 8, s_rmcCog, sizeof(s_rmcCog))) s_rmcCog[0] = '\0';
+            }
+        }
         else if (strncmp(typ, "GSA", 3) == 0) nGSA++;
         else if (strncmp(typ, "GSV", 3) == 0) {
             nGSV++;
@@ -766,12 +811,34 @@ static void handleRawNmeaLine(const char* line) {
                           (unsigned long)nGGA, (unsigned long)nRMC, (unsigned long)nGSA,
                           (unsigned long)nGSV, (unsigned long)nOth, (unsigned long)nCk,
                           lastQual, lastSats, maxCno, nCnoAny, s_cnrMask, nCnoUse);
+            // Receiver velocity per epoch over the same 5 s: real, empty fields,
+            // repeated value, none usable; and stalls begun. Healthy: rx ~= RMC.
+            Serial.printf("   🧭 vel/5s: rx=%lu empty=%lu repeat=%lu none=%lu stalls=%lu\n",
+                          (unsigned long)s_velRx, (unsigned long)s_velEmpty, (unsigned long)s_velRepeat,
+                          (unsigned long)s_velNone, (unsigned long)s_velStalls);
+            s_velRx = s_velEmpty = s_velRepeat = s_velNone = s_velStalls = 0;
             nGGA = nRMC = nGSA = nGSV = nOth = nCk = 0;
             gsvMaxCno = gsvUse = gsvAny = 0;
         }
     }
     if (strncmp(line, "$PQTMEPE,", 9) == 0) {
         handlePQTMEPE(line);
+        return;
+    }
+    // Replies to the runtime command queue (see serviceCmdQueue): logged verbatim,
+    // with the PPP read-back decoded as the boot-time read-back does.
+    if (strncmp(line, "$PQTMCFG", 8) == 0 || strncmp(line, "$PQTMSAVEPAR", 12) == 0) {
+        if (strncmp(line, "$PQTMCFGPPP,OK,", 15) == 0) {
+            const int mode = (int)strtol(line + 15, nullptr, 16);
+            Serial.printf("📡 LG290P PPP = %s%s\n",
+                          mode == 2 ? "E6 HAS (Galileo)" : mode == 1 ? "B2b (BeiDou)" : "OFF",
+                          mode == (int)s_pppMode ? "  ✅ matches config" : "  ⚠️ does NOT match config");
+        } else if (strncmp(line, "$PQTMCFGPPP,ERROR", 17) == 0) {
+            Serial.printf("⚠️ LG290P rejected PPP (%s) — ERROR,3 means the flashed "
+                          "LG290P firmware has no PPP command set; update it to v2.01+.\n", line);
+        } else {
+            Serial.printf("📡 LG290P reply: %s\n", line);
+        }
         return;
     }
 #if defined(PPP_NAV_DEBUG) && PPP_NAV_DEBUG
@@ -857,6 +924,9 @@ static float gnss_measureOutputRateHz(HardwareSerial& port) {
 
 // ── Public init ───────────────────────────────────────────────────────────────
 void gnss_init(HardwareSerial& serial) {
+    // The GNSS UART TX lock exists before any task that could write the port.
+    if (!s_txMutex) s_txMutex = xSemaphoreCreateMutex();
+    s_txPort = &serial;
     // Enlarge the UART RX buffer BEFORE begin(). Default is 256 bytes, which at
     // 460800 baud fills in ~5.5 ms — far too small if loop() ever stalls (e.g.
     // a display redraw or BLE meta burst). 4096 bytes buffers ~89 ms of data,
@@ -1099,7 +1169,175 @@ String gnss_buildGGA(const GnssData& g) {
 static void gnssProcessTinyGps();   // applies a parsed line's fields to gps (defined below)
 static void gnssUpdateRate();       // 2 s rate calc (defined below)
 
+// ── GNSS UART transmit: RTCM forwarding and runtime commands ──────────────────
+// Two writers share the receiver's RX line at runtime: the NTRIP task forwarding
+// RTCM, and gnss_loop() sending dashboard-requested PQTM commands. The receiver
+// parses one byte stream, so a command written between two bytes of an RTCM frame
+// corrupts that frame (CRC fails, the correction epoch is lost) and usually the
+// command too. Neither a time gap nor the driver's own per-write lock prevents it:
+// RTCM arrives from TCP in arbitrary chunks, so a frame can be split across two
+// forwards with the command landing between them.
+//
+// PROTECTIVE NOTE: the rule is enforced here. s_txMutex serialises the two writers,
+// and the forwarder tracks RTCM v3 framing (0xD3, 6 reserved zero bits, 10-bit
+// length, payload, 3-byte CRC) over every byte it forwards, under that mutex. A
+// command is written only while holding the mutex with the tracker at a frame
+// boundary, so the next RTCM byte after it begins a new frame. Do not write the
+// GNSS UART at runtime by any other path. (Boot-time sendPQTM runs in setup()
+// before the NTRIP task exists, so it needs neither.)
+static uint16_t s_rtcmLeft = 0;                  // bytes still due in the current frame
+static uint8_t  s_rtcmHdr = 0, s_rtcmLenHi = 0;  // preamble/length bytes seen (0..2)
+static uint32_t s_lastForwardMs = 0;             // millis() of the last forwarded byte
+
+static void rtcmTrack(const uint8_t* d, size_t n) {
+    while (n) {
+        if (s_rtcmLeft) {                         // inside a frame: skip what is left of it
+            const size_t k = n < s_rtcmLeft ? n : s_rtcmLeft;
+            s_rtcmLeft -= (uint16_t)k; d += k; n -= k;
+            continue;
+        }
+        const uint8_t b = *d++; n--;
+        if (s_rtcmHdr == 0) {                     // at a boundary: only 0xD3 starts a frame
+            if (b == 0xD3) s_rtcmHdr = 1;
+        } else if (s_rtcmHdr == 1) {              // reserved bits must be zero
+            if (b & 0xFC) s_rtcmHdr = (b == 0xD3) ? 1 : 0;
+            else { s_rtcmLenHi = b; s_rtcmHdr = 2; }
+        } else {                                  // length low byte: payload + CRC follow
+            s_rtcmLeft = (uint16_t)((((uint16_t)s_rtcmLenHi & 0x03) << 8) | b) + 3;
+            s_rtcmHdr = 0;
+        }
+    }
+}
+static inline bool rtcmAtBoundary() { return s_rtcmLeft == 0 && s_rtcmHdr == 0; }
+
+// Complete a frame the stream abandoned (session closed, or stalled mid-frame).
+// The receiver's parser is still waiting for the rest of it, and would swallow
+// whatever comes next — a command, or the first frames of a new session — as
+// payload. Zero bytes, exactly as many as the frame still lacks, put both parsers
+// on the same boundary; the frame fails its CRC and is discarded, as it already
+// would be. Call with s_txMutex held. Returns true once at a boundary (false: the
+// FIFO filled first; call again).
+static bool padDeadFrame(HardwareSerial& serial) {
+    static const uint8_t zeros[64] = {0};
+    size_t need = s_rtcmHdr == 1 ? 5 : s_rtcmHdr == 2 ? 4 : s_rtcmLeft;
+    int room = serial.availableForWrite();
+    while (need && room > 0) {
+        const size_t k = need < sizeof(zeros) ? need : sizeof(zeros);
+        const size_t w = k < (size_t)room ? k : (size_t)room;
+        serial.write(zeros, w);
+        rtcmTrack(zeros, w);
+        need -= w; room -= (int)w;
+    }
+    return rtcmAtBoundary();
+}
+
+void gnss_rtcmStreamStart() {
+    if (!s_txPort) return;
+    HardwareSerial& serial = *s_txPort;
+    const uint32_t t0 = millis();
+    if (s_txMutex) xSemaphoreTake(s_txMutex, portMAX_DELAY);
+    const unsigned owed = s_rtcmHdr == 1 ? 5u : s_rtcmHdr == 2 ? 4u : (unsigned)s_rtcmLeft;
+    while (!padDeadFrame(serial) && millis() - t0 < 200) {
+        if (s_txMutex) xSemaphoreGive(s_txMutex);
+        delay(1);
+        if (s_txMutex) xSemaphoreTake(s_txMutex, portMAX_DELAY);
+    }
+    s_rtcmLeft = 0; s_rtcmHdr = 0;                // a wedged UART: start clean regardless
+    if (s_txMutex) xSemaphoreGive(s_txMutex);
+    if (owed) Serial.printf("📡 RTCM: last session ended mid-frame — completed it with %u filler bytes\n", owed);
+}
+
+// RTCM → receiver without stalling loop().
+// PROTECTIVE NOTE: do not replace this with a plain serial.write(data, len).
+// arduino-esp32 (esp32-hal-uart.c) takes the port's lock for EVERY uartWrite,
+// uartRead and uartAvailable, and uartWriteBuf holds it across uart_write_bytes —
+// which, with HardwareSerial's default TX ring of 0, blocks until all but the
+// 128-byte FIFO has left the wire at 46 bytes/ms. A 1 KB RTCM burst therefore held
+// the lock ~20 ms, and loop() — polling serial.available() for NMEA on the same
+// port — sat blocked for all of it, once per correction burst (in the simulator
+// this reproduces the field's IMU log rate of ~49.2 Hz instead of 50). Writing only
+// what the FIFO has room for never blocks inside the driver; the wait happens here,
+// in the NTRIP task, with both locks free. (A TX ring buffer would also fix it, but
+// costs internal RAM the source-table scan guard needs.)
+void gnss_forwardRtcm(HardwareSerial& serial, const uint8_t* d, size_t n) {
+    const uint32_t t0 = millis();
+    while (n) {
+        if (s_txMutex) xSemaphoreTake(s_txMutex, portMAX_DELAY);   // held < 1 ms by either side
+        const int room = serial.availableForWrite();
+        size_t k = 0;
+        if (room > 0) {
+            k = n < (size_t)room ? n : (size_t)room;
+            serial.write(d, k);
+            rtcmTrack(d, k);
+            s_lastForwardMs = millis();
+            d += k; n -= k;
+        } else if (millis() - t0 > 200) {
+            // A healthy FIFO drains 128 B in under 3 ms; 200 ms means the UART is
+            // wedged. Drop the remainder rather than hang the NTRIP task — the
+            // receiver resyncs on the next preamble. The dropped bytes still go
+            // through the tracker so it stays aligned with the stream.
+            rtcmTrack(d, n);
+            if (s_txMutex) xSemaphoreGive(s_txMutex);
+            static uint32_t lastWarn = 0;
+            if (millis() - lastWarn > 10000) {
+                lastWarn = millis();
+                Serial.printf("⚠️  NTRIP: GNSS UART TX not draining — dropped %u RTCM bytes\n", (unsigned)n);
+            }
+            return;
+        }
+        if (s_txMutex) xSemaphoreGive(s_txMutex);
+        if (!k) delay(1);
+    }
+}
+
+// Write one runtime command if, right now, it cannot split an RTCM frame and fits
+// the TX FIFO whole (so the write cannot block in the driver). Returns false to
+// mean "not now — try again next pass".
+static bool sendCmdBetweenFrames(HardwareSerial& serial, const char* cmd) {
+    char ck[4];
+    gnss_checksum(cmd, ck);
+    char line[96];
+    const int len = snprintf(line, sizeof(line), "%s*%s\r\n", cmd, ck);
+    if (len <= 0 || len >= (int)sizeof(line)) return true;   // cannot be sent; drop it
+    if (s_txMutex && xSemaphoreTake(s_txMutex, 0) != pdTRUE) return false;
+    bool ok = rtcmAtBoundary();
+    // Casters send every second, so 3 s of silence mid-frame means the rest of that
+    // frame is not on its way; complete it so the command can go (see padDeadFrame).
+    if (!ok && (int32_t)(millis() - s_lastForwardMs) >= 3000) ok = padDeadFrame(serial);
+    if (ok && serial.availableForWrite() < len) ok = false;
+    if (ok) serial.write((const uint8_t*)line, (size_t)len);
+    if (s_txMutex) xSemaphoreGive(s_txMutex);
+    return ok;
+}
+
+// ── Runtime commands (dashboard mask / PPP changes) ───────────────────────────
+// PROTECTIVE NOTE: never send these with sendPQTM() from gnss_loop(). sendPQTM's
+// 150 ms settle delay — three of them for a mask change, plus the PPP read-back's
+// 700 ms wait that DISCARDS everything else on the port — ran inside loop(), so
+// one tap of Apply stopped NMEA parsing, BLE and IMU sampling for 0.5-1 s and
+// overflowed the 4 KB UART ring (lost epochs). Commands are queued instead and
+// sent one per loop pass at the same 150 ms spacing, each only between RTCM frames
+// (sendCmdBetweenFrames above).
+// The receiver's replies are logged by handleRawNmeaLine as they arrive.
+static char     s_cmdQ[12][80];   // two full Apply taps (mask + PPP = 6 commands each)
+static uint8_t  s_cmdHead = 0, s_cmdCount = 0;
+static uint32_t s_cmdNextMs = 0;
+static void queueCmd(const char* cmd) {
+    if (s_cmdCount >= 12) { Serial.printf("⚠️  GNSS command queue full — dropped %s\n", cmd); return; }
+    strlcpy(s_cmdQ[(s_cmdHead + s_cmdCount) % 12], cmd, sizeof(s_cmdQ[0]));
+    s_cmdCount++;
+}
+static void serviceCmdQueue(HardwareSerial& port) {
+    if (!s_cmdCount) return;
+    if (s_cmdNextMs && (int32_t)(millis() - s_cmdNextMs) < 0) return;
+    if (!sendCmdBetweenFrames(port, s_cmdQ[s_cmdHead])) return;   // mid-frame: next pass
+    s_cmdHead = (s_cmdHead + 1) % 12; s_cmdCount--;
+    s_cmdNextMs = (millis() + 150) | 1;
+}
+
 void gnss_loop(HardwareSerial& serial) {
+    serviceCmdQueue(serial);
+
     // Deferred mask apply requested by the web task. Handled HERE so the GNSS task is
     // the only writer to the UART and to NVS. No module reset: the position-engine
     // elevation/C-N0 thresholds take effect on the next epoch, and PQTMSAVEPAR persists
@@ -1107,16 +1345,16 @@ void gnss_loop(HardwareSerial& serial) {
     if (s_maskApplyPending) {
         s_maskApplyPending = false;
         char mb[48];
-        snprintf(mb, sizeof(mb), "$PQTMCFGELETHD,W,%.1f", s_eleMask); sendPQTM(serial, mb);
-        snprintf(mb, sizeof(mb), "$PQTMCFGCNRTHD,W,%.1f", s_cnrMask); sendPQTM(serial, mb);
-        sendPQTM(serial, "$PQTMSAVEPAR");
+        snprintf(mb, sizeof(mb), "$PQTMCFGELETHD,W,%.1f", s_eleMask); queueCmd(mb);
+        snprintf(mb, sizeof(mb), "$PQTMCFGCNRTHD,W,%.1f", s_cnrMask); queueCmd(mb);
+        queueCmd("$PQTMSAVEPAR");
         Preferences p;
         if (p.begin("rcx_gnss", false)) {
             p.putFloat("ele", s_eleMask);
             p.putFloat("cnr", s_cnrMask);
             p.end();
         }
-        Serial.printf("🛰️  GNSS masks applied: ele=%.1f° cnr=%.1f dB-Hz (saved)\n",
+        Serial.printf("🛰️  GNSS masks queued: ele=%.1f° cnr=%.1f dB-Hz (saved; receiver replies follow)\n",
                       s_eleMask, s_cnrMask);
     }
 
@@ -1126,16 +1364,19 @@ void gnss_loop(HardwareSerial& serial) {
     // and flags a pre-v2.01 firmware that can't do PPP at all.
     if (s_pppApplyPending) {
         s_pppApplyPending = false;
-        sendPppConfig(serial, s_pppMode);
-        sendPQTM(serial, "$PQTMSAVEPAR");
+        char pc[64];
+        buildPppConfig(pc, sizeof(pc), s_pppMode);
+        queueCmd(pc);
+        queueCmd("$PQTMSAVEPAR");
+        queueCmd("$PQTMCFGPPP,R");   // read-back; the reply is logged by handleRawNmeaLine
         Preferences p;
         if (p.begin("rcx_gnss", false)) {
             p.putUChar("ppp", s_pppMode);
             p.end();
         }
-        Serial.printf("🛰️  PPP set to %s (saved)\n",
+        Serial.printf("🛰️  PPP %s queued (saved; read-back follows)\n",
                       s_pppMode == 2 ? "E6 HAS" : s_pppMode == 1 ? "B2b" : "off");
-        gnss_readAndLogPpp(serial);
+        
     }
 
     // ── Bounded, LINE-AT-A-TIME drain ────────────────────────────────────────
@@ -1185,6 +1426,211 @@ void gnss_loop(HardwareSerial& serial) {
     }
 
     gnssUpdateRate();
+}
+
+// ── Velocity from the RTK track ───────────────────────────────────────────────
+// Positions are stamped with the receiver's own epoch time (UTC ms of day), not
+// host millis(): parse time jitters by tens of ms with UART/loop scheduling, and
+// over a 300 ms window that jitter alone would be a several-percent speed error.
+struct TrackPt { int32_t tMs; double lat, lon; };
+static TrackPt s_trk[GNSS_TRACK_PTS];
+static uint8_t s_trkN = 0, s_trkHead = 0;     // count held, next write slot
+static uint8_t s_trkRtk = 0xFF;               // rtkType the held track was recorded under
+
+static void trackReset() { s_trkN = 0; s_trkHead = 0; }
+
+static void trackPush(int32_t tMs, double lat, double lon, uint8_t rtkType) {
+    // A change of solution type moves the position by up to decimetres in one
+    // epoch; a fit across it would read that jump as velocity. Start over.
+    if (rtkType != s_trkRtk) { trackReset(); s_trkRtk = rtkType; }
+    if (s_trkN) {
+        const TrackPt& last = s_trk[(s_trkHead + GNSS_TRACK_PTS - 1) % GNSS_TRACK_PTS];
+        if (last.tMs == tMs) return;          // same epoch delivered twice
+    }
+    s_trk[s_trkHead] = { tMs, lat, lon };
+    s_trkHead = (s_trkHead + 1) % GNSS_TRACK_PTS;
+    if (s_trkN < GNSS_TRACK_PTS) s_trkN++;
+}
+
+// Quadratic least-squares fit of north and east position against time over the
+// held track, evaluated at the newest epoch. Returns false when there are too few
+// recent points, the geometry is degenerate, or the fit's residual-based velocity
+// 1-sigma exceeds GNSS_TRACK_MAX_SIGMA_MPS.
+static bool trackVelocity(double& vN, double& vE, double& velSigmaOut) {
+    if (s_trkN < GNSS_TRACK_MIN_PTS) return false;
+    const TrackPt& nw = s_trk[(s_trkHead + GNSS_TRACK_PTS - 1) % GNSS_TRACK_PTS];
+    const double mPerDegN = 111132.954 - 559.822 * cos(2.0 * nw.lat * (M_PI / 180.0));   // WGS84 meridian arc per degree
+    const double mPerDegE = 111319.491 * cos(nw.lat * (M_PI / 180.0));
+    double tau[GNSS_TRACK_PTS], yN[GNSS_TRACK_PTS], yE[GNSS_TRACK_PTS];
+    int n = 0;
+    for (int k = 0; k < s_trkN; k++) {
+        const TrackPt& p = s_trk[(s_trkHead + GNSS_TRACK_PTS - 1 - k) % GNSS_TRACK_PTS];
+        int32_t d = p.tMs - nw.tMs;                                   // <= 0
+        if (d >  43200000) d -= 86400000;                             // across 00:00 UTC
+        if (d < -43200000) d += 86400000;
+        if (d > 0 || d < -GNSS_TRACK_SPAN_MS) continue;
+        tau[n] = d * 0.001;
+        yN[n]  = (p.lat - nw.lat) * mPerDegN;
+        yE[n]  = (p.lon - nw.lon) * mPerDegE;
+        n++;
+    }
+    if (n < GNSS_TRACK_MIN_PTS) return false;
+    double S1 = 0, S2 = 0, S3 = 0, S4 = 0, N0 = 0, N1 = 0, N2 = 0, E0 = 0, E1 = 0, E2 = 0;
+    for (int i = 0; i < n; i++) {
+        const double t = tau[i], t2 = t * t;
+        S1 += t; S2 += t2; S3 += t2 * t; S4 += t2 * t2;
+        N0 += yN[i]; N1 += t * yN[i]; N2 += t2 * yN[i];
+        E0 += yE[i]; E1 += t * yE[i]; E2 += t2 * yE[i];
+    }
+    const double S0 = n;
+    // Inverse of the symmetric normal matrix [[S0,S1,S2],[S1,S2,S3],[S2,S3,S4]].
+    const double c00 = S2 * S4 - S3 * S3, c01 = S2 * S3 - S1 * S4, c02 = S1 * S3 - S2 * S2;
+    const double det = S0 * c00 + S1 * c01 + S2 * c02;
+    if (fabs(det) < 1e-12) return false;
+    const double c11 = S0 * S4 - S2 * S2, c12 = S1 * S2 - S0 * S3, c22 = S0 * S2 - S1 * S1;
+    auto solve = [&](double y0, double y1, double y2, double& a, double& b, double& c) {
+        a = (c00 * y0 + c01 * y1 + c02 * y2) / det;
+        b = (c01 * y0 + c11 * y1 + c12 * y2) / det;
+        c = (c02 * y0 + c12 * y1 + c22 * y2) / det;
+    };
+    double aN, bN, cN, aE, bE, cE;
+    solve(N0, N1, N2, aN, bN, cN);
+    solve(E0, E1, E2, aE, bE, cE);
+    double ssr = 0;
+    for (int i = 0; i < n; i++) {
+        const double t = tau[i];
+        const double rN = yN[i] - (aN + bN * t + cN * t * t), rE = yE[i] - (aE + bE * t + cE * t * t);
+        ssr += rN * rN + rE * rE;
+    }
+    const double sigma2 = ssr / (2.0 * (n - 3));                     // per-axis position noise
+    const double velSigma = sqrt(2.0 * sigma2 * c11 / det);          // horizontal velocity 1-sigma
+    if (velSigma > GNSS_TRACK_MAX_SIGMA_MPS) return false;
+    vN = bN; vE = bE; velSigmaOut = velSigma;
+    return true;
+}
+
+// ── Velocity selection — once per epoch, at the epoch-complete RMC ────────────
+// The receiver's own SOG/COG (Doppler-class) are used whenever this epoch carries
+// them. When it does not — fields empty, or a held repeat — the RTK track supplies
+// them. When neither is available the channel is marked invalid and BLE omits it:
+// an empty channel is honest, a frozen one is not. Called under dataMutex.
+static void gnssSelectVelocity() {
+    const bool sogEmpty = (s_rmcSog[0] == '\0');
+    const bool cogEmpty = (s_rmcCog[0] == '\0');
+    const bool repeated = !sogEmpty && !cogEmpty &&
+                          strcmp(s_rmcSog, s_prevSog) == 0 && strcmp(s_rmcCog, s_prevCog) == 0 &&
+                          atof(s_rmcSog) > GNSS_VEL_REPEAT_MIN_KN;
+    strlcpy(s_prevSog, s_rmcSog, sizeof(s_prevSog));
+    strlcpy(s_prevCog, s_rmcCog, sizeof(s_prevCog));
+
+    // Track: every valid epoch, whatever the receiver's velocity did.
+    double vN = 0, vE = 0, vSig = 0;
+    bool trkOk = false;
+    if (gps.valid) {
+        const int32_t tMs = (int32_t)(((gps.hour * 60L + gps.minute) * 60L + gps.second) * 1000L + gps.millisecond);
+        trackPush(tMs, gps.latitude, gps.longitude, gps.rtkType);
+        trkOk = trackVelocity(vN, vE, vSig);
+    } else {
+        trackReset();
+    }
+    const double trkSpd = trkOk ? sqrt(vN * vN + vE * vE) : 0.0;
+    // Heading from the track only where its noise is small against the speed.
+    const double hdgFloor = fmax((double)GNSS_TRACK_MIN_HDG_MPS, GNSS_TRACK_HDG_SIGMA_K * vSig);
+    const bool   trkHdgOk = trkOk && trkSpd >= hdgFloor;
+    double trkHdg = trkOk ? atan2(vE, vN) * (180.0 / M_PI) : 0.0;
+    if (trkHdg < 0) trkHdg += 360.0;
+    gps.trkSpeedMps   = trkOk ? (float)trkSpd : NAN;
+    gps.trkHeadingDeg = trkHdgOk ? (float)trkHdg : NAN;
+
+    if (!gps.valid) {
+        gps.speedValid = gps.headingValid = false;
+        gps.velSrc = 3;
+        return;
+    }
+
+    const bool rxSpd = !sogEmpty && !repeated;
+    const bool rxHdg = !cogEmpty && !repeated;
+
+    // Account for the receiver's velocity this epoch (see "Receiver velocity
+    // stalls" above). A stall is an epoch moving above GNSS_VEL_REPEAT_MIN_KN by
+    // the track (or by the last speed) whose SOG was empty or repeated.
+    const bool movingNow = (trkOk && trkSpd > GNSS_VEL_REPEAT_MIN_KN * 0.514444) ||
+                           (gps.speedValid && gps.speedKnots > GNSS_VEL_REPEAT_MIN_KN);
+    const bool stale = !rxSpd && movingNow;
+    if (rxSpd) s_velRx++;
+    else if (repeated) s_velRepeat++;
+    else if (sogEmpty) s_velEmpty++;
+    if (stale && !s_velWasStale) s_velStalls++;
+    s_velWasStale = stale;
+    if (rxSpd) {
+        gps.speedKnots = atof(s_rmcSog);
+        gps.speedValid = true;
+        gps.velSrc = 0;
+        gps.velUpdateMillis = millis();
+    } else if (trkOk) {
+        gps.speedKnots = trkSpd / 0.514444;
+        gps.speedValid = true;
+        gps.velSrc = sogEmpty ? 1 : 2;
+    } else {
+        gps.speedValid = false;
+        gps.velSrc = 3;
+        s_velNone++;
+    }
+
+    if (rxHdg) {
+        gps.headingDeg = atof(s_rmcCog);
+        gps.headingValid = true;
+    } else if (trkHdgOk) {
+        gps.headingDeg = trkHdg;
+        gps.headingValid = true;
+    } else if (gps.speedValid && gps.speedKnots * 0.514444 < hdgFloor) {
+        // Slow or stopped: direction of travel is undefined, and the last real
+        // heading is the conventional value to hold. headingValid keeps its state.
+    } else {
+        gps.headingValid = false;
+    }
+}
+
+// ── Midnight date guard ───────────────────────────────────────────────────────
+// Item 146 (Utc 24 h early for a few samples at 00:00 UTC): the firmware passes
+// RMC date and time through as received, so if the receiver's date field lags
+// its time-of-day rollover by a few epochs, those epochs read as the PREVIOUS
+// day. Unconfirmed on the LG290P — this repairs it if it happens and says so in
+// the log: time-of-day running backwards is the day rolling over, and a date
+// that has not advanced with it is advanced here. Runs once per epoch-complete
+// RMC, under dataMutex.
+static void civilAddDay(uint16_t& y, uint8_t& m, uint8_t& d) {
+    if (m < 1 || m > 12) return;
+    static const uint8_t dim[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    const bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    const uint8_t last = (m == 2 && leap) ? 29 : dim[m - 1];
+    if (++d > last) { d = 1; if (++m > 12) { m = 1; y++; } }
+}
+static void gnssGuardMidnightDate() {
+    static uint32_t prevTod = 0;
+    static uint16_t prevY = 0; static uint8_t prevM = 0, prevD = 0;   // date before the rollover
+    static uint16_t fixY = 0;  static uint8_t fixM = 0,  fixD = 0;    // date it should be after it
+    static bool     haveFix = false;
+    const uint32_t tod = ((gps.hour * 60UL + gps.minute) * 60UL + gps.second) * 1000UL + gps.millisecond;
+    if (prevY && tod + 43200000UL < prevTod) {            // time-of-day wrapped: a new UTC day
+        fixY = prevY; fixM = prevM; fixD = prevD;
+        civilAddDay(fixY, fixM, fixD);
+        haveFix = true;
+    } else if (tod >= 60000UL) {
+        haveFix = false;                                  // a minute in: the receiver's date stands
+    }
+    if (haveFix && gps.year == prevY && gps.month == prevM && gps.day == prevD &&
+        !(fixY == prevY && fixM == prevM && fixD == prevD)) {
+        static uint32_t lastLog = 0;
+        if (millis() - lastLog > 60000) {
+            lastLog = millis();
+            Serial.printf("🕛 RMC date %04u-%02u-%02u lagged the 00:00 UTC rollover — using %04u-%02u-%02u\n",
+                          gps.year, gps.month, gps.day, fixY, fixM, fixD);
+        }
+        gps.year = fixY; gps.month = fixM; gps.day = fixD;
+        return;                                           // prev* stays the pre-rollover date
+    }
+    prevTod = tod; prevY = gps.year; prevM = gps.month; prevD = gps.day;
 }
 
 // ── Apply a just-parsed TinyGPS++ update to shared gps state ──────────────────
@@ -1252,10 +1698,11 @@ static void gnssProcessTinyGps() {
                 gps.diffAgeS = -1.0;   // empty field → no differential corrections in use
             }
         }
-        bool spdUpd = tinygps.speed.isUpdated();
-        bool crsUpd = tinygps.course.isUpdated();
-        if (spdUpd)  gps.speedKnots = tinygps.speed.knots();
-        if (crsUpd)  gps.headingDeg = tinygps.course.deg();
+        // Speed/course are NOT taken from TinyGPS++ (an empty RMC field reads back
+        // as the previous value, marked updated — see s_rmcSog). Clear its flags so
+        // they cannot accumulate; gnssSelectVelocity() below owns these fields.
+        (void)tinygps.speed.value();
+        (void)tinygps.course.value();
         // ── Epoch-complete marker ────────────────────────────────────────────
         // s_rmcLineDone was set by handleRawNmeaLine for THIS sentence (checksum
         // already verified), and we are past the speed/course application above,
@@ -1263,18 +1710,13 @@ static void gnssProcessTinyGps() {
         // (SD snapshot, BLE freshness) keys on epochSeq — never on the timestamp,
         // which GGA advances a sentence too early. That gap WAS the Langley
         // stale-speed bug; keying on the timestamp again reintroduces it.
+        const bool epochComplete = s_rmcLineDone;
         if (s_rmcLineDone) {
             s_rmcLineDone = false;
-            // velUpdateMillis only advances when speed/course actually committed a
-            // NEW value this epoch — not on every epoch regardless. RMC's SOG/COG
-            // fields can legitimately arrive blank (receiver momentarily not
-            // confident in a velocity solution) while position stays valid; when
-            // that happens speedKnots/headingDeg correctly hold their last value
-            // per the isUpdated() gate above, and this timestamp must say so, not
-            // claim they're fresh. It was doing the latter — the ONLY signal
-            // spd_age_ms (sd_log.cpp) and BLE have for "how old is this speed/
-            // heading" was silently lying whenever RMC omitted SOG/COG.
-            if (spdUpd || crsUpd) gps.velUpdateMillis = millis();
+            // Speed/heading for this epoch — receiver, RTK track, or marked
+            // invalid — and velUpdateMillis (spd_age_ms) advanced only for a real
+            // receiver velocity. Must run before the epochSeq bump publishes them.
+            gnssSelectVelocity();
             gps.epochSeq++;
         }
         if (tinygps.satellites.isUpdated()) gps.numSV      = tinygps.satellites.value();
@@ -1292,6 +1734,7 @@ static void gnssProcessTinyGps() {
                 gps.day   = tinygps.date.day();
             }
         }
+        if (epochComplete && gps.valid) gnssGuardMidnightDate();
 
         // Fix and RTK type
         if (!gps.valid) {

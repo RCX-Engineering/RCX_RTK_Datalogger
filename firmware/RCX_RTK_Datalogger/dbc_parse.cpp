@@ -15,6 +15,7 @@
 
 #include "config.h"
 #include "dbc_parse.h"
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 static DbcSignal* s_sig      = nullptr;
 static int        s_sigCount = 0;

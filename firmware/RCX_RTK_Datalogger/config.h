@@ -50,6 +50,17 @@
 // the list is empty.
 #define WIFI_RETRY_INTERVAL_MS   15000
 
+// While someone is USING the dashboard over the configuration AP — a device joined
+// AND a page or poll served within WIFI_AP_ACTIVITY_MS — the station search
+// (scan + association attempts) is paused: every scan and WiFi.begin() retunes
+// the one radio away from the AP's channel and drops the phone off the page. A
+// device that merely auto-joined the open AP pauses nothing. An edit to the
+// network list (add/enable/reorder) still gets one immediate sweep, and the pause
+// lifts for one sweep after WIFI_AP_CLIENT_PAUSE_MAX_MS so an idle open page can
+// never hold the unit off its network (and RTK) for long.
+#define WIFI_AP_ACTIVITY_MS          120000
+#define WIFI_AP_CLIENT_PAUSE_MAX_MS  180000
+
 // Station power save WIFI_PS_MIN_MODEM instead of sleep-off, so the 2.4 GHz
 // coexistence arbiter can grant the BLE controller its connection anchors —
 // see radio-discipline rule 5 in wifi_mgr.cpp for the mechanism and the
@@ -92,6 +103,11 @@ extern const char* ntripPreferredMpt[];
 // While cooling down, phase-0 direct connect skips it so the geographic
 // fallback (rtk2go nearest) actually gets used instead of being preempted.
 #define NTRIP_PREF_COOLDOWN_MS               600000   // 10 min
+// A session that is accepted and then closed by the caster with no RTCM delivered counts against its
+// mountpoint. After this many in a row the mountpoint is set aside for NTRIP_BAD_MOUNT_COOLDOWN_MS and
+// the scan selects the next candidate.
+#define NTRIP_EMPTY_SESSIONS_BEFORE_ABANDON  3
+#define NTRIP_BAD_MOUNT_COOLDOWN_MS          900000   // 15 min
 
 // While riding a public fallback mount, probe the preferred mount (own base)
 // this often (at standstill) to notice it coming online. A private/undeclared
@@ -122,19 +138,39 @@ extern const char* ntripPreferredMpt[];
 // 60 s connect cadence can never flood it with sourcetable requests.
 #define NTRIP_CONNECT_BACKOFF_MAX_MS         60000
 
-// Bounds every blocking read/write on the persistent NTRIP connection
-// (ntripClient) once its connect handshake is complete — most importantly the
-// periodic ~10 s GGA keep-alive print() sent while riding a non-VRS
-// single-base mount (RCX1, rtk2go). The ESP32-S3 has ONE 2.4 GHz radio shared
+// No caster is dialled until the internet itself is confirmed up. A caster dial that fails tells
+// nothing about WHY (hotspot lost its data, WiFi dropped a moment ago, host down, IP banned at the
+// caster's firewall: all look like a connect timeout), and repeating it every few seconds is exactly
+// the pattern a caster's firewall reads as a reconnect loop. So after a link drop, a session drop or a
+// failed dial, the client asks the open internet instead (a bare TCP connect to two public resolvers
+// by address, never a caster) and dials only once that answers. The check repeats at this spacing
+// while it fails, and a caster is dialled the moment it first passes.
+#define NTRIP_NET_RETRY_MS                   10000
+// A dial that fails while the internet check passes is that host's own failure (down, or banned): it
+// counts like a refused login. Five in a row on the 30 s floor / 60 s cap schedule (about four minutes)
+// set aside a mount that has never delivered corrections; a mount that has delivered is never set aside.
+// Safety valve for a network that filters the check itself (its public resolvers unreachable while
+// casters work): on a network where no check has EVER passed, after this many consecutive failed
+// checks with the WiFi link up, ONE caster dial is allowed per NTRIP_NET_BYPASS_DIAL_MS until a check
+// passes. A network whose checks passed before and fail now has lost its internet: no valve.
+#define NTRIP_NET_CHECKS_BEFORE_BYPASS           6
+#define NTRIP_NET_BYPASS_DIAL_MS             60000
+
+// Bounds blocking READS on the persistent NTRIP connection (ntripClient) once
+// its connect handshake is complete (Stream::setTimeout). It does NOT bound
+// writes on core 3.3.8 — NetworkClient::write waits in select() on its own fixed
+// 1 s x 10 schedule — so the GGA keep-alive below is sent only when a zero-timeout
+// select says the socket can take it (ntrip.cpp). The concern behind both is the
+// periodic ~10 s GGA keep-alive sent while riding a non-VRS single-base mount
+// (RCX1, rtk2go). The ESP32-S3 has ONE 2.4 GHz radio shared
 // by WiFi and BLE via time-sliced coexistence: a keep-alive write stalled for
 // seconds on a lossy mobile hotspot (routine in a moving car) can hold that
 // radio long enough for the coexistence arbiter to skip a scheduled BLE
 // connection event — which reads as a dropped 20 Hz BLE frame with no
 // BLE-side cause at all. A stalled send just retries on the next keep-alive
 // cycle instead of blocking wifiNtripTask (and the shared radio) for seconds.
-// Generous relative to a normal send (a GGA sentence is under 100 bytes —
-// single-digit milliseconds on a working link) while still capping the
-// worst case to a small fraction of a second. Applied only AFTER the connect
+// 250 ms is generous for a read on a working link while capping a stalled one
+// to a small fraction of a second. Applied only AFTER the connect
 // handshake / header drain in connectNtrip(), which still relies on the
 // WiFiClient default timeout to wait through normal TCP packet gaps.
 #define NTRIP_CLIENT_IO_TIMEOUT_MS              250
@@ -201,19 +237,25 @@ extern const char* ntripPreferredMpt[];
 
 // Mirror ALL Serial output to a debug_<stamp>.txt file on the SD card, so field
 // serial logs are capturable without a serial monitor (e.g. from a phone in the
-// car). OFF by default — set true to diagnose, then read the file off the card.
+// car). Compiled in and ON by default; it can be switched off from the web page.
 // Costs an 8 KB RAM ring + one bounded write batch per logger pass when ON.
 // This only controls whether the mirror mechanism is COMPILED IN at all. Whether
 // it's actually armed at boot is a runtime choice — see DEBUG_SERIAL_TO_SD_FORCE_ON
 // immediately below, and the web-page toggle (persisted to NVS) at /debug_log.
-#define DEBUG_SERIAL_TO_SD  false
+#define DEBUG_SERIAL_TO_SD  true
+
+// One line per operator action (web page, buttons), stamped with seconds since boot — the same
+// clock as the "#UTC_SYNC" marker in the canraw file and the 30 s "SD rows" line — so a log
+// can be read against what the person did. `Serial` resolves at the use site, so the line
+// reaches the debug mirror wherever debug_log.h is included.
+#define RCX_USER_ACTION(text) Serial.printf("👤 USER [%lus]: %s\n", (unsigned long)(millis() / 1000UL), (text))
 
 // Runtime override: when true, the mirror is armed at every boot NO MATTER WHAT
 // the web toggle / NVS says — the web checkbox still shows state but can't turn
-// it off. Use this when a session's log absolutely cannot be allowed to depend on
-// remembering to flip the web toggle beforehand (e.g. NVS was left off from a
-// past bench test). Leave false for the normal case: default-on-first-boot,
-// then controlled from the web page and persisted across reboots from there.
+// it off. Leave false for the normal case: the mirror is on by default (first boot,
+// before the web page has ever written a preference), and the web toggle at /debug_log
+// turns it on or off from there, persisted across reboots. Switching it off closes the
+// debug file, so it is complete and downloadable without a writer behind it.
 // Has no effect unless DEBUG_SERIAL_TO_SD above is also true.
 #define DEBUG_SERIAL_TO_SD_FORCE_ON  false
 
@@ -296,6 +338,29 @@ extern const char* ntripPreferredMpt[];
 // Must exceed the worst in-epoch GGA→RMC gap (~35 ms during the GSV second) and
 // stay under one epoch (50 ms) so a dropped RMC costs latency, not a lost row.
 #define GNSS_EPOCH_WATCHDOG_MS   45
+
+// ── Velocity from the RTK track ───────────────────────────────────────────────
+// Under live RTK the LG290P drops its own SOG/COG for the rest of a second at a
+// time (runs of 19 epochs at 20 Hz, rising with speed — 2026-08-30 NCCAR,
+// 2026-09-10 CSC) while position keeps updating cleanly at 20 Hz. For those epochs
+// gnss.cpp publishes velocity differentiated from the track instead: a quadratic
+// least-squares fit to the last GNSS_TRACK_PTS positions, evaluated at the newest
+// epoch (no lag under constant acceleration). Its velocity noise is 13.6x the
+// per-epoch position noise per axis — ~0.05 m/s for the few millimetres of a FIXED
+// solution. The fit's own residuals estimate that noise, and a track noisier than
+// GNSS_TRACK_MAX_SIGMA_MPS is not used — a solution jump or metre-class wander then
+// leaves the channel empty rather than wrong.
+#define GNSS_TRACK_PTS            7      // positions kept (7 = 300 ms at 20 Hz)
+#define GNSS_TRACK_MIN_PTS        5      // fit needs this many inside the span
+#define GNSS_TRACK_SPAN_MS        320    // oldest usable position, ms before the newest
+#define GNSS_TRACK_MAX_SIGMA_MPS  0.25f  // reject a fit whose velocity 1-sigma exceeds this
+#define GNSS_TRACK_MIN_HDG_MPS    0.5f   // track heading needs at least this speed AND
+#define GNSS_TRACK_HDG_SIGMA_K    8.0f   // this many velocity 1-sigmas (≤ ~7° of heading noise);
+                                         // below either, the last heading is held
+// An RMC whose SOG and COG text both repeat the previous epoch's exactly, at a
+// speed above this, is a held value, not a measurement: 3-decimal knots and
+// 2-decimal degrees cannot both stay identical across 50 ms while moving.
+#define GNSS_VEL_REPEAT_MIN_KN    2.0
 // ── RTK HOLD ──────────────────────────────────────────────────────────────────
 // <Timeout> field of $PQTMCFGRTK — "the max differential age of RTK fix" (seconds):
 // how long the LG290P keeps computing a high-precision, model-predicted RTK fix
@@ -411,17 +476,35 @@ extern const char* ntripPreferredMpt[];
 // only; the BLE/SoloStorm stream is untouched and always runs full-rate,
 // null values included, so this has no effect on anything a driver sees live.
 //
-// IMU: once the accelerometer/gyro have read below both thresholds
-// continuously for IMU_MOTIONLESS_DWELL_MS, SD logging drops from 50 Hz to
-// IMU_MOTIONLESS_LOG_MS between rows. A single sample back above threshold
-// restores full rate immediately — slow to slow down, instant to speed up.
-#define IMU_MOTIONLESS_GYRO_DPS   3.0f     // gyro magnitude below this = still
-#define IMU_MOTIONLESS_ACCEL_G    0.03f    // |accel| - 1g below this = still
-#define IMU_MOTIONLESS_DWELL_MS   3000     // continuous stillness required
+// IMU: once the accelerometer magnitude and gyro have stayed within both thresholds of their own
+// slow running average (so sensor scale and bias errors do not matter), and the car is
+// below IMU_ACTIVE_SPEED_MPS, continuously for IMU_MOTIONLESS_DWELL_MS, SD logging drops
+// from the active rate to IMU_MOTIONLESS_LOG_MS between rows; the decoded CAN channel
+// follows the same state. A single sample back above threshold
+// restores full rate immediately — slow to slow down, instant to speed up. The IMU is read at
+// the active rate even while parked, and the last IMU_PREROLL_MS of IMU samples and decoded-CAN
+// snapshots are written out when the car wakes, so the first moments of motion are logged too.
+// The dwell is long enough that a stop in a grid queue, a cone placement or a
+// static calibration window is logged at full rate; only a unit left parked
+// drops. Never applied in the LCD's cone survey mode, where the still dwells
+// ARE the data (pose segmentation, and the gravity / gyro-bias estimate the
+// cone algorithm takes from each dwell). Thermal inhibit (thermal.h) is
+// separate and still applies in every mode.
+#define IMU_MOTIONLESS_GYRO_DPS   1.0f     // gyro change from its running average below this = still (parked noise p99 0.3 °/s)
+#define IMU_MOTIONLESS_ACCEL_G    0.02f    // |accel| change from its running average below this = still (parked noise peaks 0.014 g)
+#define IMU_MOTIONLESS_DWELL_MS   60000    // continuous stillness required
+#define IMU_MOTIONLESS_REF_TAU_MS 1000     // accel magnitude and gyro are compared with their own running average over this time
 #define IMU_MOTIONLESS_LOG_MS     1000     // reduced-rate row interval (1 Hz)
+#define IMU_ACTIVE_SPEED_MPS      1.0f     // RTK-track or CAN speed above this keeps the car active
+#define IMU_POLL_ACTIVE_MS        4        // IMU read + row interval while active (250 Hz)
+#define IMU_POLL_IDLE_MS          20       // IMU read interval during a calibration capture (50 Hz); otherwise the IMU is always read at the active rate
+#define IMU_PREROLL_MS            250      // while reduced-rate, the last this-many ms of samples are kept and written out ahead of the first full-rate row, so a launch loses nothing
+#define IMU_PUBLISH_MS            50       // shared-snapshot interval (20 Hz): BLE streams at 20 Hz and the display needs no more
+#define CAN_LOG_ACTIVE_MS         20       // decoded CAN row interval while active (50 Hz)
+#define CAN_LOG_MOTIONLESS_MS     1000     // decoded CAN row interval once motionless (1 Hz)
 
 // CAN: while status.canHz reads zero (bus silent — vehicle off), SD logging
-// drops from 20 Hz to once every CAN_IDLE_LOG_MS. Any measured frame rate
+// drops to once every CAN_IDLE_LOG_MS. Any measured frame rate
 // above zero restores full rate on the very next row.
 #define CAN_IDLE_LOG_MS           10000    // reduced-rate row interval (0.1 Hz)
 

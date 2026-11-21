@@ -47,12 +47,14 @@
 #include "can_porsche718_extra.h"
 #include "types.h"
 #include "config.h"
+#include "breadcrumb.h"
 
 #if defined(CAN_ENABLE) && CAN_ENABLE
 
 #include "driver/twai.h"
 #include <Preferences.h>
 #include "sd_log.h"          // sdlog_push_can_raw() — raw frame logging in sniffer mode
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 // ── CAN sniffer / diagnostic state ────────────────────────────────────────────
 // All of this is inert unless canSniffEnabled is true. The snapshot table holds
@@ -95,8 +97,7 @@ void can_setSniffer(bool on) {
         xSemaphoreGive(sniffMux);
     }
     canSniffEnabled = on;
-    Serial.printf("🔎 CAN sniffer %s\n",
-                  on ? "ENABLED — capturing ALL IDs" : "disabled");
+    RCX_USER_ACTION(on ? "CAN raw sniffer ON — capturing ALL IDs" : "CAN raw sniffer OFF");
 }
 bool can_getSniffer() { return canSniffEnabled; }
 uint32_t can_getSniffOverflow() { return sniffOverflow; }
@@ -446,8 +447,10 @@ void canBusTask(void*) {
 
     for (;;) {
         twai_message_t msg;
+        crumb::mark(crumb::SLOT_CAN, crumb::C_WAIT);
         esp_err_t r = twai_receive(&msg, pdMS_TO_TICKS(10));
         if (r == ESP_OK) {
+            crumb::mark(crumb::SLOT_CAN, crumb::C_DECODE);
             // Sniffer hooks (all inert when disabled). We take sniffMux ONCE for
             // the whole drain batch (≤rx_queue_len frames, O(1) each) with a 2 ms
             // cap, so the snapshot update can never stall real-time CAN draining;
@@ -528,6 +531,7 @@ void canBusTask(void*) {
         }
 
         // Push accumulated values to the shared struct at 20 Hz.
+        crumb::mark(crumb::SLOT_CAN, crumb::C_PUBLISH);
         if (dirty && now - lastPush >= 50) {
             lastPush = now;
             if (activeProfile == VEH_987)      pushToGlobal987(local987);
@@ -554,6 +558,7 @@ void canBusTask(void*) {
         }
 
         // Bus health / recovery — every 200 ms.
+        crumb::mark(crumb::SLOT_CAN, crumb::C_HEALTH);
         if (now - lastHealth >= 200) {
             lastHealth = now;
             serviceBusHealth();

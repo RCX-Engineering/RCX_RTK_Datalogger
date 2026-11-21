@@ -71,6 +71,14 @@ static bool s_modeSet    = false;
 
 static const char* NVS_NS = "rcx_wifi";
 
+// Configuration-AP courtesy (WIFI_AP_CLIENT_PAUSE_MAX_MS). s_listChanged is
+// raised by the list mutators (web task) and consumed by wifi_service().
+static volatile bool     s_listChanged  = false;
+static uint32_t          s_pauseSinceMs = 0;      // 0 = search not paused
+static volatile uint32_t s_lastWebMs    = 0;      // last dashboard page/poll served (web task)
+
+void wifi_noteWebActivity() { s_lastWebMs = millis() | 1; }
+
 // ── NVS ──────────────────────────────────────────────────────────────────────
 static void loadNetworks() {
     s_count = 0;
@@ -437,6 +445,31 @@ bool wifi_tryConnect() {
     return false;
 }
 
+// True while the station search should stand aside for a phone on the AP.
+static bool searchPausedForApClient() {
+    const uint32_t web = s_lastWebMs;
+    const bool inUse = s_apUp && WiFi.softAPgetStationNum() > 0 &&
+                       web != 0 && (millis() - web) < WIFI_AP_ACTIVITY_MS;
+    if (!inUse) { s_pauseSinceMs = 0; s_listChanged = false; return false; }
+    if (s_listChanged) {                       // the operator just changed the list: try it now
+        s_listChanged  = false;
+        s_pauseSinceMs = millis() | 1;         // and pause again after this sweep
+        Serial.println("📶 WiFi: network list changed — one search despite the phone on the AP");
+        return false;
+    }
+    if (s_pauseSinceMs == 0) {
+        s_pauseSinceMs = millis() | 1;
+        Serial.println("📶 WiFi: dashboard in use over the setup AP — station search paused (scans would drop it)");
+        return true;
+    }
+    if (millis() - s_pauseSinceMs >= WIFI_AP_CLIENT_PAUSE_MAX_MS) {
+        s_pauseSinceMs = millis() | 1;
+        Serial.println("📶 WiFi: dashboard still in use over the setup AP — one search, then paused again");
+        return false;
+    }
+    return true;
+}
+
 bool wifi_service() {
     if (WiFi.status() == WL_CONNECTED) {
         s_linkWasUp = true;
@@ -484,6 +517,7 @@ bool wifi_service() {
         }
     }
 
+    if (searchPausedForApClient()) { s_nextAttemptMs = millis() + 1000; return false; }
     if (wifi_tryConnect()) return true;
     s_nextAttemptMs = millis() + WIFI_RETRY_INTERVAL_MS;
     return false;
@@ -508,6 +542,7 @@ bool wifi_setEnabled(int i, bool enabled) {
     if (s_nets[i].enabled == enabled) return true;
     s_nets[i].enabled = enabled;
     saveNetworks();
+    if (enabled) s_listChanged = true;
     Serial.printf("📶 WiFi: %s %s\n", enabled ? "enabled" : "disabled", s_nets[i].ssid);
     // A live link is deliberately left alone. Disabling a network means "stop
     // choosing this one", not "drop me right now" — cutting the connection the
@@ -526,6 +561,7 @@ bool wifi_add(const char* ssid, const char* pass) {
         if (strcmp(s_nets[i].ssid, ssid) == 0) {
             strlcpy(s_nets[i].pass, pass ? pass : "", sizeof(s_nets[0].pass));
             saveNetworks();
+            s_listChanged = true;
             Serial.printf("📶 WiFi: updated credentials for %s\n", ssid);
             return true;
         }
@@ -537,6 +573,7 @@ bool wifi_add(const char* ssid, const char* pass) {
     s_nets[s_count].enabled = true;
     s_count++;
     saveNetworks();
+    s_listChanged = true;
     Serial.printf("📶 WiFi: added %s (%d stored)\n", ssid, s_count);
     return true;
 }
@@ -557,6 +594,7 @@ bool wifi_move(int i, int delta) {
     s_nets[i] = s_nets[j];
     s_nets[j] = tmp;
     saveNetworks();
+    s_listChanged = true;
     return true;
 }
 

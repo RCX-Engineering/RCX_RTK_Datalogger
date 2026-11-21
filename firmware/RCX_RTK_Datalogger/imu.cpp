@@ -9,12 +9,14 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <math.h>
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 // ── QMI8658 register map ─────────────────────────────────────────────────────
 #define QMI8658_WHO_AM_I  0x00
 #define QMI8658_CTRL1     0x02
 #define QMI8658_CTRL2     0x03   // accel config
 #define QMI8658_CTRL3     0x04   // gyro config
+#define QMI8658_CTRL5     0x06   // low-pass filter enables
 #define QMI8658_CTRL7     0x08   // enable sensors
 #define QMI8658_TEMP_L    0x33   // temperature low byte  (high byte at 0x34)
 #define QMI8658_AX_L      0x35   // 6 bytes accel, 6 bytes gyro
@@ -31,7 +33,7 @@ static bool  calLoaded    = false;     // a valid bias is in effect
 
 // Non-blocking capture machine
 static volatile ImuCalState calState = IMU_CAL_IDLE;
-static const int   CAL_TARGET = 100;   // samples (~2 s at 50 Hz read rate)
+static const int   CAL_TARGET = 100;   // samples (~2 s: the loop reads at 50 Hz during a capture)
 static int         calCount   = 0;
 static double      calSum[6]   = {0,0,0,0,0,0};   // ax,ay,az,gx,gy,gz (raw, bias-free)
 static double      calSumSq[6] = {0,0,0,0,0,0};   // for motion (variance) check
@@ -41,6 +43,10 @@ static const float CAL_MAX_GYRO_STD  = 2.0f;    // dps — still hand-held is < 
 static const float CAL_MAX_ACCEL_STD = 0.08f;   // g
 
 static const char* NVS_NS = "rcx_imu";
+// Sensor configuration the stored bias was measured under. A bias captured under a different
+// configuration (other ODR, filter or self-test state) does not apply to this one, so a stored
+// calibration without this tag is ignored until "imucal" is run again.
+static const int IMU_CFG_TAG = 2;
 
 // ── Low-level I2C helpers ─────────────────────────────────────────────────────
 static void reg_write(uint8_t reg, uint8_t val) {
@@ -63,7 +69,8 @@ static void loadCalibration() {
     Preferences p;
     p.begin(NVS_NS, true);                 // read-only
     bool valid = p.getBool("valid", false);
-    if (valid) {
+    const bool staleCfg = valid && p.getInt("cfg", 0) != IMU_CFG_TAG;
+    if (valid && !staleCfg) {
         accelBias[0] = p.getFloat("abx", 0);
         accelBias[1] = p.getFloat("aby", 0);
         accelBias[2] = p.getFloat("abz", 0);
@@ -73,6 +80,9 @@ static void loadCalibration() {
         calLoaded = true;
     }
     p.end();
+    if (staleCfg)
+        Serial.println("⚠️  IMU stored calibration was taken under another sensor configuration — ignored. "
+                       "Send \"imucal\" while still & flat.");
     if (calLoaded) {
         Serial.printf("✅ IMU calibration loaded: aBias=[%.3f %.3f %.3f]g gBias=[%.2f %.2f %.2f]dps\n",
                       accelBias[0], accelBias[1], accelBias[2],
@@ -86,6 +96,7 @@ static void saveCalibration() {
     Preferences p;
     p.begin(NVS_NS, false);                // read-write
     p.putBool("valid", true);
+    p.putInt("cfg", IMU_CFG_TAG);
     p.putFloat("abx", accelBias[0]);
     p.putFloat("aby", accelBias[1]);
     p.putFloat("abz", accelBias[2]);
@@ -110,19 +121,25 @@ bool imu_init() {
     }
 
     reg_write(QMI8658_CTRL1, 0x60);  // auto-increment address enabled
-    reg_write(QMI8658_CTRL2, 0xAC);  // Accel: 1024 Hz ODR, ±8g, LPF on
+    // Register layout (QMI8658C datasheet, CTRL2/CTRL3/CTRL5): CTRL2 and CTRL3 are
+    // [7]=self-test enable, [6:4]=full scale, [3:0]=output data rate; ODR code 0100 = 500 Hz
+    // (normal mode). Both self-test bits are left clear. CTRL5 enables the on-chip low-pass
+    // filters at their widest setting, 14 % of the ODR = 70 Hz, so the 250 Hz reads below see
+    // no content above their 125 Hz Nyquist frequency.
+    reg_write(QMI8658_CTRL2, 0x24);  // Accel: ±8g, 500 Hz ODR
     // Gyro CTRL3: bits[6:4]=FSR, bits[3:0]=ODR.  *** SCALE BUG FIX ***
     // This was 0xAA, whose FSR bits [6:4]=010 select ±64 dps — but GYRO_SCALE below assumes
     // ±512 dps, so every gyro reading came out 8× too large (512/64). Confirmed against the
     // commute log: integrated yaw was a constant 7.95× the GPS heading change on every turn.
     // ±64 dps also clips an autocross car (slaloms/spins exceed 64 dps), so the right fix is
     // to program the ±512 the code already expects, not to down-scale to ±64.
-    //   ±512 dps = bits[6:4]=101, 1024 Hz ODR = bits[3:0]=1010  →  0xDA
-    reg_write(QMI8658_CTRL3, 0xDA);  // Gyro:  1024 Hz ODR, ±512 dps (was 0xAA = ±64, mislabeled)
+    //   ±512 dps = bits[6:4]=101, 500 Hz ODR = bits[3:0]=0100  →  0x54
+    reg_write(QMI8658_CTRL3, 0x54);  // Gyro:  ±512 dps, 500 Hz ODR
+    reg_write(QMI8658_CTRL5, 0x77);  // Low-pass filters on, accel and gyro, 14 % of ODR
     reg_write(QMI8658_CTRL7, 0x03);  // Enable accel + gyro
 
     delay(50);
-    Serial.println("✅ QMI8658 IMU initialized (±8g, ±512dps, 1kHz)");
+    Serial.println("✅ QMI8658 IMU initialized (±8g, ±512dps, 500 Hz, 70 Hz low-pass)");
     // gz sign note: raw gz follows the right-hand rule (Z-up ⇒ positive = counterclockwise /
     // left turn). GPS compass heading is the opposite sense (positive = clockwise / right
     // turn). That is why integrated raw gz is the NEGATIVE of GPS heading change — expected,

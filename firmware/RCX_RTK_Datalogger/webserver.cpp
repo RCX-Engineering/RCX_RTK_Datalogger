@@ -18,7 +18,7 @@
  *   POST /log/delete   Delete a batch (body: names=a.csv,b.csv,...), bounded to
  *                       DELETE_BATCH_MAX per request
  *   GET  /log_config   JSON — per-channel log enable flags + master pause state
- *   POST /log_config   Toggle flags (URL params: gps=0|1 imu=0|1 can=0|1 sat=0|1)
+ *   POST /log_config   Toggle flags (URL params: gps=0|1 imu=0|1 can=0|1 sat=0|1 nmea=0|1)
  *   GET  /log_pause    JSON — master pause state
  *   POST /log_pause    Set it (URL param: on=0|1). Suspends every channel and
  *                       releases the files they hold open, so those files can be
@@ -37,6 +37,7 @@
 
 #include "webserver.h"
 #include "config.h"
+#include "breadcrumb.h"
 #include "gnss.h"
 #include "types.h"
 #include "sd_log.h"
@@ -51,24 +52,34 @@
 #include <memory>        // std::shared_ptr / std::make_shared
 #include <string>        // std::string / std::to_string
 
-// Forward-declare just the 3 functions the /debug_log route needs, instead of
+// Forward-declare just the 4 functions the /debug_log route needs, instead of
 // #include "debug_log.h": that header redirects Serial -> Debug when
 // DEBUG_SERIAL_TO_SD is compiled in, and this file is NOT one of the tee-mirrored
 // translation units (see debug_log.h) and has ~15 pre-existing Serial.print* call
-// sites of its own. Undoing the redirect with #undef is exactly what caused a real
-// compile break (Serial becomes fully unresolvable, not "reverted" — see debug_log.cpp
-// for the full explanation) — so webserver.cpp simply never lets the macro apply here.
+// sites of its own. Rebinding Serial after the redirect needs the core's own macro saved
+// first (see debug_log.cpp) — so webserver.cpp simply never lets the macro apply here.
 #if defined(DEBUG_SERIAL_TO_SD) && DEBUG_SERIAL_TO_SD
 namespace DebugLog {
     bool isEnabled();
     bool isForced();
     void setEnabled(bool on);
+    const char* currentFileName();
 }
 #endif
 
 #if defined(WEBSERVER_ENABLE) && WEBSERVER_ENABLE
 
 #include <ESPAsyncWebServer.h>
+
+// async_tcp task stack. AsyncTCP sizes the task from CONFIG_ASYNC_TCP_STACK_SIZE inside its own
+// translation unit, so the value is set for the whole build in build_opt.h (sketch folder).
+// The calculated worst case on this stack is 5,244 B (qa/memmodel.py section 6: a handler
+// sending a chunked response whose fill callback formats floating point), 73% of 7,168 B.
+// If this fires, build_opt.h was not picked up and the task would silently keep the 16 KB default.
+#ifdef CONFIG_ASYNC_TCP_STACK_SIZE
+static_assert(CONFIG_ASYNC_TCP_STACK_SIZE == 7168,
+              "build_opt.h must define CONFIG_ASYNC_TCP_STACK_SIZE=7168 (copy it next to the .ino)");
+#endif
 #include <WiFi.h>
 #include <SD_MMC.h>
 #include <vector>
@@ -107,29 +118,33 @@ static bool webBegun = false;
 // async_tcp task — DlState ctor/dtor — so a plain volatile int is sufficient.
 static volatile int g_activeDownloads = 0;
 
-// Download filename for the archive built by the last /export/build. Empty falls
-// back to the generic names in the /export.tar handler. Written and read only on
-// the (serial) async_tcp task, and only between a build request and its download.
+// Filename the archive of the current /export/build is stored under on the card (the
+// name the browser chose, e.g. a session stamp in its own timezone). Empty lets the
+// firmware pick its default. Written and read only on the (serial) async_tcp task.
 //
-// The value reaches a Content-Disposition header, so it is rebuilt character by
-// character from a strict whitelist rather than trusted: a quote or a CRLF in a
-// response header is a header-injection, and anything outside this set has no
-// business in a filename anyway.
-static char exportFileName[48] = "";
+// The value becomes a filename on the card and reaches a Content-Disposition header,
+// so it is rebuilt character by character from a strict whitelist rather than
+// trusted: a quote or a CRLF in a response header is a header-injection, and a path
+// separator would leave the card root. A name that does not fit the listing's
+// filename width is refused rather than cut, since a cut name would no longer end
+// in .tar.
+static char exportFileName[LOG_NAME_MAX] = "";
 
 static void setExportFileName(const String& in) {
     size_t out = 0;
-    for (size_t i = 0; i < in.length() && out < sizeof(exportFileName) - 1; i++) {
+    bool tooLong = false;
+    for (size_t i = 0; i < in.length(); i++) {
         const char c = in[i];
         const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                         (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-        if (ok) exportFileName[out++] = c;
+        if (!ok) continue;
+        if (out >= sizeof(exportFileName) - 1) { tooLong = true; break; }
+        exportFileName[out++] = c;
     }
     exportFileName[out] = '\0';
     // Must still be a plausible archive name after filtering, and must not have
     // been reduced to a relative path by it.
-    const bool tar = out > 4 && strcmp(exportFileName + out - 4, ".tar") == 0;
-    if (!tar || strstr(exportFileName, "..")) exportFileName[0] = '\0';
+    if (tooLong || !sdlog_isArchiveName(exportFileName) || strstr(exportFileName, "..")) exportFileName[0] = '\0';
 }
 
 // Internal-RAM low-water marks, sampled in loop() (defined in the .ino). Surfaced
@@ -174,6 +189,7 @@ padding:.5rem .7rem;box-shadow:0 1px 2px rgba(20,24,29,.06)}
 .val.warn{background:var(--warn-bg);color:var(--warn-fg)}
 .val.bad{background:var(--bad-bg);color:var(--bad-fg)}
 .val.neutral{color:var(--neutral-fg)}
+.inh{background:var(--bad-bg);color:var(--bad-fg);font-weight:700;font-size:1.05rem;padding:.7rem .9rem;border-radius:8px;margin:.4rem 0}
 .empty{color:var(--muted);font-style:italic}
 .files{display:flex;flex-direction:column;gap:.35rem}
 .row{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.45rem .7rem;
@@ -302,7 +318,10 @@ function loadSD(){
       '<span><span class="label">Free</span><span class="val '+(pct>0.9?'bad':pct>0.7?'warn':'ok')+'">'+freeStr+'</span></span>'+
       '<progress value="'+pct+'" max="1" class="'+cls+'"></progress>'+
       '<span><span class="label">Total</span><span class="val">'+totalStr+'</span></span>'+
-      '<span><span class="label">Files</span><span class="val">'+d.files+'</span></span>';
+      '<span><span class="label">Files</span><span class="val">'+d.files+'</span></span>'+
+      // Card write failures this boot: each closed and reopened a log file within
+      // the session (sd_log.cpp failChannel). Shown only once one has happened.
+      ((d.write_faults>0)?'<span><span class="label">Write faults</span><span class="val warn">'+d.write_faults+'</span></span>':'');
   }).catch(function(){el.innerHTML='<span class="empty">SD unavailable</span>';});}
 // Master pause bar — present on the dashboard and the log page, same markup and
 // same endpoint, so the two never disagree about what is recording.
@@ -351,12 +370,14 @@ static const char PAGE_DASH[] PROGMEM = R"html(<!DOCTYPE html>
 <div id="logcfg">
   <div class="trow"><div><div class="tlabel">GPS</div><div class="tdesc">Position &middot; RTK &middot; NTRIP &middot; accuracy &mdash; 20 Hz</div></div>
     <label class="sw"><input type="checkbox" id="tog_gps" onchange="setLog('gps',this.checked)"><span class="sl"></span></label></div>
-  <div class="trow"><div><div class="tlabel">IMU</div><div class="tdesc">Accel &middot; Gyro &mdash; 50 Hz independent file</div></div>
+  <div class="trow"><div><div class="tlabel">IMU</div><div class="tdesc">Accel &middot; Gyro &mdash; 250 Hz while moving, 1 Hz when parked</div></div>
     <label class="sw"><input type="checkbox" id="tog_imu" onchange="setLog('imu',this.checked)"><span class="sl"></span></label></div>
-  <div class="trow"><div><div class="tlabel">CAN</div><div class="tdesc">RPM &middot; speeds &middot; oil &middot; steering &middot; gear &mdash; 20 Hz</div></div>
+  <div class="trow"><div><div class="tlabel">CAN</div><div class="tdesc">RPM &middot; speeds &middot; oil &middot; steering &middot; gear &mdash; 50 Hz while moving, 1 Hz when parked</div></div>
     <label class="sw"><input type="checkbox" id="tog_can" onchange="setLog('can',this.checked)"><span class="sl"></span></label></div>
   <div class="trow"><div><div class="tlabel">SAT</div><div class="tdesc">Satellites &middot; PRN &middot; Elev &middot; Azimuth &middot; SNR &mdash; 1 Hz</div></div>
     <label class="sw"><input type="checkbox" id="tog_sat" onchange="setLog('sat',this.checked)"><span class="sl"></span></label></div>
+  <div class="trow"><div><div class="tlabel">Raw receiver (debug)</div><div class="tdesc">Every GGA &amp; RMC sentence exactly as the receiver sent it &mdash; for debugging sessions; leave off otherwise.</div></div>
+    <label class="sw"><input type="checkbox" id="tog_nmea" onchange="setLog('nmea',this.checked)"><span class="sl"></span></label></div>
   <div class="trow"><div><div class="tlabel">LCD</div><div class="tdesc">Screen + backlight &mdash; always starts ON after a reboot regardless of this setting.</div></div>
     <label class="sw"><input type="checkbox" id="tog_lcd" onchange="setLcd(this.checked)"><span class="sl"></span></label></div>
   <div class="trow" id="row_dbg"><div><div class="tlabel">Debug log</div><div class="tdesc" id="dbg_desc">Serial output mirrored to debug_*.txt on SD &mdash; for field debugging when a serial monitor isn't available.</div><div id="dbg_dl"></div></div>
@@ -418,12 +439,19 @@ function loadStat(){
       stat('RPM',d.rpm,'','')+
       stat('TPS',d.tps,'','')+
       stat('Oil Temp',d.oil_c,'','');
+    // Free RAM is INTERNAL heap (heap field of /status), whose normal level on this
+    // build is ~28-32 KB; PSRAM is not in it. Amber below 24 KB and red below
+    // 16 KB mark a real drop from that level, not the level itself.
     var health=
       statS('CPU Temp',(d.esp_temp_f&&d.esp_temp_f!=='--')?d.esp_temp_f+' &deg;F':'--',(d.esp_temp_f&&d.esp_temp_f!=='--')?tempState(parseFloat(d.esp_temp_f)):'neutral')+
       statS('Free RAM',(typeof d.heap==='number')?((d.heap/1024).toFixed(0)+' KB'+(typeof d.heap_min==='number'?(' &#x2193;'+(d.heap_min/1024).toFixed(0)):'')):'---',
-           (typeof d.heap!=='number')?'neutral':(d.heap<50000)?'bad':(d.heap<80000)?'warn':'ok')+
+           (typeof d.heap!=='number')?'neutral':(d.heap<16384)?'bad':(d.heap<24576)?'warn':'ok')+
       stat('Min free block',(typeof d.heap_block_min==='number')?((d.heap_block_min/1024).toFixed(0)+' KB'):'---','','');
-    var h=grp('Connectivity',conn)+grp('GPS',gps)+grp('CAN',can)+grp('Software Health',health);
+    // RTK held back by internal RAM: a full-width red banner above everything else, with the
+    // reason, so it is not one more row in Software Health.
+    var inh=(d.rtk_inh>0)?'<div class="inh">&#x26D4; RTK '+(d.ntrip==='connected'?'AT RISK':'INHIBITED')+' &mdash; '+d.rtk_inh_why+
+      ' ('+((d.heap/1024).toFixed(1))+' KB free, largest block '+((d.heap_block/1024).toFixed(1))+' KB)</div>':'';
+    var h=inh+grp('Connectivity',conn)+grp('GPS',gps)+grp('CAN',can)+grp('Software Health',health);
     document.getElementById('stat').innerHTML=h;
   }).catch(function(){document.getElementById('stat').innerHTML='<span class="empty">Unavailable</span>';});}
 function loadLogConfig(){
@@ -434,6 +462,7 @@ function loadLogConfig(){
     document.getElementById('tog_imu').checked=!!d.imu;
     document.getElementById('tog_can').checked=!!d.can;
     document.getElementById('tog_sat').checked=!!d.sat;
+    document.getElementById('tog_nmea').checked=!!d.nmea;
     // These switches show the channel set that WILL run; while paused nothing is
     // recording, so say so rather than letting the switches imply otherwise.
     var hint=document.getElementById('chanhint');
@@ -473,11 +502,39 @@ function loadDebugLog(){
     var dl=document.getElementById('dbg_dl');
     if(dl){
       // The file is still being written; content lags live serial by up to ~1s.
+      // Same rule as every other download: logging must be paused first (Pause logging,
+      // top of this page). The link says so instead of sending a request that is refused.
       dl.innerHTML = d.file
-        ? '<a class="ref" style="display:inline-block;margin-top:.35rem" href="/log/'+d.file+'" download>&#x2B07; '+d.file+'</a>'
+        ? '<a class="ref" style="display:inline-block;margin-top:.35rem" href="/log/'+d.file+'" onclick="return dbgDl(this)">&#x2B07; '+d.file+'</a>'+
+          '<div class="tdesc" style="margin-top:.2rem">Pause logging (top of this page) to download.</div>'
         : '<span class="empty">No debug file yet \u2014 starts once GPS sets the session timestamp.</span>';
     }
   }).catch(function(){var row=document.getElementById('row_dbg'); if(row) row.style.display='none';});}
+// The debug file is downloaded inside a one-file .tar: the archive build copies the open serial mirror
+// consistently, and the tar download path is the one that completes (a direct read of the growing
+// file stalls after a couple of KB). The archive stays on the card, listed with the logs.
+var dbgBusy=false;
+function dbgDl(a){
+  if(!window._paused){ toast('Pause logging first \u2014 button at the top of this page',false); return false; }
+  if(dbgBusy) return false;
+  var f=a.getAttribute('href').replace(/^\/log\//,'');
+  dbgBusy=true;
+  toast('Building archive\u2026',true);
+  function fail(m){ dbgBusy=false; toast(m,false); }
+  fetch('/export/build',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'names='+encodeURIComponent(f)+'&file='+encodeURIComponent('rcx_'+f.replace(/\.txt$/,'.tar'))})
+    .then(function(r){
+      if(!r.ok) throw 0;
+      var tries=0;
+      var iv=setInterval(function(){
+        fetch('/export/status').then(function(r){return r.json();}).then(function(s){
+          if(s.state==='ready'){ clearInterval(iv); dbgBusy=false; window.location='/log/'+encodeURIComponent(s.name); }
+          else if(s.state==='error'){ clearInterval(iv); fail('Export failed'); }
+          else if(++tries>120){ clearInterval(iv); fail('Export timed out'); }
+        }).catch(function(){ clearInterval(iv); fail('Network error'); });
+      },1000);
+    }).catch(function(){ fail('Could not start the archive'); });
+  return false;}
 function setDebugLog(val){
   fetch('/debug_log?en='+(val?'1':'0'),{method:'POST'}).then(function(r){return r.json();}).then(function(d){
     var t=document.getElementById('tog_dbg');
@@ -487,26 +544,14 @@ function setDebugLog(val){
   }).catch(function(){toast('Network error',false);});}
 // ── CAN sniffer ──────────────────────────────────────────────────────────────
 // Lives with the log channels because that is what it is: another capture
-// stream competing for the same SD write budget.
+// stream writing to the same SD card.
 function setSniff(on){
-  // When ENABLING, offer to keep the normal log channels running alongside the
-  // sniffer (force=1). Default answer is safe (exclusive): Cancel = channels off.
-  // OK = concurrent, accepting that raw-frame + typed logging together can exceed
-  // the SD card's sustained write rate and drop frames under load.
-  var force=0;
-  if(on){
-    force=confirm('Enable CAN sniffer WITH GPS/IMU/CAN logging still running?\n\n'+
-      'OK  = log everything together (for finding vehicle-dynamics channels).\n'+
-      '        Heavy bus traffic may exceed SD write speed and drop frames —\n'+
-      '        watch the sniffer drops/overflow counters.\n\n'+
-      'Cancel = sniff only, other log channels turned off (safer).')?1:0;
-  }
-  fetch('/can/sniff?on='+(on?1:0)+'&force='+force,{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+  // The sniffer runs alongside the normal log channels: they have their own queues, files and
+  // buffers, so turning it on changes nothing else that is logging.
+  fetch('/can/sniff?on='+(on?1:0),{method:'POST'}).then(function(r){return r.json();}).then(function(d){
     window._sniffOn=d.sniffer; document.getElementById('tog_sniff').checked=d.sniffer;
-    toast('CAN sniffer '+(d.sniffer?'ON':'OFF')+(d.sniffer&&force?' + logging':''),d.sniffer);
-    // In exclusive mode the server forced the log channels off — resync those
-    // switches so they show what is actually running.
-    if(d.sniffer){loadSniff();loadLogConfig();}
+    toast('CAN sniffer '+(d.sniffer?'ON':'OFF'),d.sniffer);
+    if(d.sniffer){loadSniff();}
     else{document.getElementById('snifftbl').innerHTML='';document.getElementById('sniffmeta').textContent='';}
   }).catch(function(){toast('Sniffer toggle failed',false);});}
 function loadSniffState(){
@@ -594,6 +639,7 @@ static const char PAGE_SETUP[] PROGMEM = R"html(<!DOCTYPE html>
 
 <h2>NTRIP Casters</h2>
 <div class="tdesc" style="margin-bottom:.4rem">Sources of RTK corrections. Built-in entries can be switched off but not deleted. Changing anything here restarts caster selection, which briefly interrupts corrections.</div>
+<div class="tdesc" style="margin-bottom:.4rem"><a href="https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RTK_Atlas.html" target="_blank" rel="noopener">Find an NTRIP Caster with the RTK Atlas tool</a></div>
 <div class="files" id="castlist"><span class="empty">Loading&hellip;</span></div>
 <div style="display:flex;align-items:center;gap:.4rem;margin:.4rem 0;flex-wrap:wrap">
   <input id="chost" class="tin" type="text" placeholder="host" maxlength="47" style="flex:2;min-width:130px">
@@ -603,7 +649,7 @@ static const char PAGE_SETUP[] PROGMEM = R"html(<!DOCTYPE html>
 <div style="display:flex;align-items:center;gap:.4rem;margin:.4rem 0;flex-wrap:wrap">
   <input id="cuser" class="tin" type="text" placeholder="username" maxlength="63" autocomplete="off" style="flex:1;min-width:120px">
   <input id="cpass" class="tin" type="text" placeholder="password" maxlength="39" autocomplete="off" style="flex:1;min-width:120px">
-  <button class="ref" onclick="castAdd()">Add</button>
+  <button class="ref" id="caddbtn" onclick="castAdd()">Add</button>
 </div>
 <div id="castmsg" class="empty" style="margin-bottom:.3rem"></div>
 <div style="display:flex;align-items:center;gap:.5rem;margin:.2rem 0 .5rem;flex-wrap:wrap">
@@ -670,6 +716,7 @@ function loadWifi(){
       return;
     }
     var h='';
+    wifiNames=d.nets.map(function(x){return x.ssid;});
     for(var i=0;i<d.nets.length;i++){
       var n=d.nets[i].ssid, on=d.nets[i].on;
       var live=(n===d.active)?' <span class="ok">&#x25CF; connected</span>':'';
@@ -680,7 +727,7 @@ function loadWifi(){
        + (on?'&#x23FB;':'&#x25CB;')+'</button> '
        + '<button class="ref" title="Higher priority" onclick="wifiMove('+i+',-1)">&#x25B2;</button> '
        + '<button class="ref" title="Lower priority" onclick="wifiMove('+i+',1)">&#x25BC;</button> '
-       + '<button class="ref" title="Remove" onclick="wifiDel('+i+',\''+esc(n).replace(/'/g,"\\'")+'\')">&#x1F5D1;</button>'
+       + '<button class="ref" title="Remove" onclick="wifiDel('+i+')">&#x1F5D1;</button>'
        + '</div></div>';
     }
     el.innerHTML=h;
@@ -712,7 +759,11 @@ function wifiAdd(){
       document.getElementById('wssid').value='';document.getElementById('wpass').value='';
       document.getElementById('wifimsg').textContent=t;loadWifi();});
 }
-function wifiDel(i,name){
+// SSIDs may hold any character (quotes, backslashes), so the button passes only the list index and the
+// name is read back from the list last loaded.
+var wifiNames=[];
+function wifiDel(i){
+  var name=wifiNames[i]==null?'this network':wifiNames[i];
   if(!confirm('Remove "'+name+'"?'))return;
   fetch('/wifi/remove',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'i='+i})
     .then(r=>r.text()).then(t=>{document.getElementById('wifimsg').textContent=t;loadWifi();});
@@ -733,8 +784,11 @@ function castReset(){
     .then(r=>r.text()).then(t=>{m.textContent=t; setTimeout(loadCasters,1500);})
     .catch(()=>{m.textContent='Reset failed \u2014 device unreachable.';});
 }
+var castTries=0;
 function loadCasters(){
   return fetch('/casters').then(r=>r.json()).then(d=>{
+    // A change is applied by the NTRIP task a moment after it is saved; keep asking until it has been.
+    if(d.pending&&castTries++<25)setTimeout(loadCasters,300);else castTries=0;
     var el=document.getElementById('castlist');
     if(!d.list||!d.list.length){el.innerHTML='<span class="empty">None configured.</span>';return;}
     var h='';
@@ -752,6 +806,15 @@ function loadCasters(){
        + '</div></div>';
     }
     el.innerHTML=h;
+    // The table holds d.max casters in all. When it is full the entry fields are blanked and locked,
+    // so nothing can be typed that could not be stored.
+    var full=d.list.length>=d.max;
+    ['chost','cport','cmount','cuser','cpass'].forEach(function(k){
+      var f=document.getElementById(k);f.disabled=full;
+      if(full){f.value='';f.dataset.ph=f.dataset.ph||f.placeholder;f.placeholder=(k==='chost')?'list full ('+d.max+') \u2014 remove one to add':'';}
+      else if(f.dataset.ph){f.placeholder=f.dataset.ph;}
+    });
+    document.getElementById('caddbtn').disabled=full;
   }).catch(()=>{document.getElementById('castlist').innerHTML='<span class="empty">unavailable</span>';});
 }
 function castEn(i,on){
@@ -896,7 +959,7 @@ static const char PAGE_LOGS[] PROGMEM = R"html(<!DOCTYPE html>
     <button class="del" id="btn_delsel" onclick="deleteSelected()" disabled>&#x1F5D1; Delete selected</button>
   </div>
 </div>
-<div class="tdesc" style="margin:.3rem 0">Pause logging to download or delete. A transfer competes with the recording writes for the SD card, and a file open for writing can&#39;t be removed at all. Downloads build a single .tar on the device first &mdash; up to 64 files per archive. Each session heading below also carries its own archive and delete buttons, named for the local time of that run.</div>
+<div class="tdesc" style="margin:.3rem 0">Pause logging to download or delete. A transfer competes with the recording writes for the SD card, and a file open for writing can&#39;t be removed at all. Downloads build a single .tar on the device first &mdash; up to 64 files per archive. The archive is kept on the card and listed under Archives, so an interrupted download can be repeated from its link without rebuilding; delete it when you are done, since it holds a second copy of the logs. Each session heading below also carries its own archive and delete buttons, named for the local time of that run.</div>
 <div id="toast"></div>
 <script src="/app.js"></script>
 <script>
@@ -994,9 +1057,11 @@ function gotoPage(off){
 // that's the form serial logs and the filenames themselves use — the thing
 // you'd cross-reference against.
 // The _UTC marker is optional here on purpose: files written before the logger
-// started stamping it are still on cards and still belong to a session.
-var SESSION_RE=/^[a-z]+_(\d{8})_(\d{6})(?:_UTC)?\.csv$/;
-function sessionKey(name){ var m=SESSION_RE.exec(name); return m?(m[1]+'_'+m[2]):null; }
+// started stamping it are still on cards and still belong to a session. So is
+// the _N suffix: a channel reopened within a session (logging resumed, or a file
+// recovered after a failed SD write) keeps the stamp as <type>_<stamp>_2.csv.
+var SESSION_RE=/^(?:[a-z]+_(\d{8})_(\d{6})(?:_UTC)?(?:_\d+)?\.csv|debug_(\d{8})_(\d{6})(?:_UTC)?\.txt)$/;
+function sessionKey(name){ var m=SESSION_RE.exec(name); return m?((m[1]||m[3])+'_'+(m[2]||m[4])):null; }
 function sessionHeading(key){
   var y=+key.slice(0,4),mo=+key.slice(4,6),d=+key.slice(6,8),
       h=+key.slice(9,11),mi=+key.slice(11,13),s=+key.slice(13,15);
@@ -1048,12 +1113,20 @@ function loadFiles(_retry){
       // a session's files are always adjacent — no re-sort needed here. A run
       // of files whose name doesn't parse (shouldn't happen, but harmless if it
       // does) just renders with no heading rather than being dropped.
-      var groups=[];
-      f.files.forEach(function(x){
+      // Keyed, not just adjacent: the serial mirror stays open all session and is listed
+      // with the open files, so it is not always next to its session's closed files — it
+      // must still land in that session's group (and its .tar), not start a second one.
+      // Stored .tar archives are listed apart from the logs, under their own heading: they
+      // belong to no session, and each one is a finished download that can be repeated.
+      var arch=[],logs=[];
+      f.files.forEach(function(x){ (/\.tar$/.test(x.name)?arch:logs).push(x); });
+      var groups=[],byKey={};
+      logs.forEach(function(x){
         var key=sessionKey(x.name);
         var last=groups[groups.length-1];
-        if(last && last.key===key) last.items.push(x);
-        else groups.push({key:key, items:[x]});
+        if(key && byKey[key]) byKey[key].items.push(x);
+        else if(!key && last && !last.key) last.items.push(x);
+        else { var g={key:key, items:[x]}; groups.push(g); if(key) byKey[key]=g; }
       });
       // The session -> filenames map the per-session buttons act on. Rebuilt
       // from scratch on every listing render so it can never name a file that
@@ -1067,7 +1140,11 @@ function loadFiles(_retry){
         // A file still recording is excluded from both session actions: the
         // archive builder skips open files anyway, and deleting one corrupts
         // FatFs. Pausing closes them, at which point they rejoin the group.
-        groupFiles[g.key]=g.items.filter(function(x){return !x.active;})
+        // The serial mirror (debug_*.txt) is open for the whole session but is safe to
+        // archive — the builder runs on its writer's own task (see buildExport) — so it
+        // stays in the session .tar. Session delete leaves it alone: the server refuses
+        // to delete anything but .csv.
+        groupFiles[g.key]=g.items.filter(function(x){return !x.active || /^debug_/.test(x.name);})
                                  .map(function(x){return x.name;});
         return '<div class="grouphead"><span>'+h.local+'</span>'+
           '<span class="gmeta">'+h.utc+' &middot; '+g.items.length+' file'+(g.items.length===1?'':'s')+
@@ -1077,6 +1154,12 @@ function loadFiles(_retry){
           '<button class="ref gdel" onclick="deleteGroup(\''+g.key+'\')">&#x1F5D1; Delete session</button>'+
           '</span></div>'+rows;
       }).join('');
+      if(arch.length){
+        var atotal=arch.reduce(function(a,x){return a+(x.size||0);},0);
+        html='<div class="grouphead"><span>Archives</span>'+
+          '<span class="gmeta">kept on the card until deleted &middot; '+arch.length+' file'+(arch.length===1?'':'s')+
+          (atotal?(' &middot; '+fsize(atotal)):'')+'</span></div>'+arch.map(row).join('')+html;
+      }
       if(pgTrunc){html+='<div class="empty" style="margin:.3rem 0">The card holds more files than the listing can track &mdash; the oldest are not shown. Delete some to see them.</div>';}
     }
     el.innerHTML=html;
@@ -1129,11 +1212,16 @@ function runExport(names,fileName){
         if(s.state==='ready'){
           clearInterval(iv); done();
           var mb=(s.size/1048576).toFixed(2);
-          ds.textContent='Archive: '+s.count+' files, '+mb+' MB';
+          // The archive now lives on the card and is listed with the logs, so the link stays
+          // usable if this transfer is interrupted — no rebuild needed.
+          var href='/log/'+encodeURIComponent(s.name);
+          ds.innerHTML='Archive saved: <a class="dl" href="'+href+'">'+esc(s.name)+'</a> &mdash; '+
+                       s.count+' files, '+mb+' MB';
           toast('Archive ready ('+s.count+' files)',true);
-          window.location='/export.tar';
+          setMode('recent');   // the new archive is listed first
+          window.location=href;
         }else if(s.state==='error'){
-          clearInterval(iv); done(); ds.textContent='Export failed'; toast('Export failed',false);
+          clearInterval(iv); done(); ds.textContent='Export failed (card full or write error)'; toast('Export failed',false);
         }else{
           var mb=(s.size/1048576).toFixed(1);
           ds.textContent='Building archive\u2026 '+(s.count||0)+' files, '+mb+' MB';
@@ -1148,11 +1236,22 @@ function runExport(names,fileName){
     },1000);
   }).catch(function(){ds.textContent=''; done(); toast('Export failed to start',false);});
 }
-function exportAll(){ runExport(null,null); }
+// Name for an archive of everything or of a selection: the moment of the build in this
+// browser's own timezone, so each build is kept as its own file. Rebuilding a session
+// reuses that session's name and replaces its earlier archive.
+function stampedArchiveName(prefix){
+  var dt=new Date();
+  function p(n){return (n<10?'0':'')+n;}
+  return prefix+'_'+dt.getFullYear()+p(dt.getMonth()+1)+p(dt.getDate())+'_'+
+         p(dt.getHours())+p(dt.getMinutes())+p(dt.getSeconds())+'_'+localZoneTag(dt)+'.tar';
+}
+function exportAll(){ runExport(null,stampedArchiveName('rcx_logs_all')); }
 function downloadSelected(){
-  var names=Object.keys(selected);
-  if(!names.length)return;
-  runExport(names,null);
+  // An archive never goes into another archive; selected .tar files are for download
+  // from their own row, or for delete.
+  var names=Object.keys(selected).filter(function(n){return !/\.tar$/.test(n);});
+  if(!names.length){ toast('Select log files to archive',false); return; }
+  runExport(names,stampedArchiveName('rcx_logs_sel'));
 }
 // ── Per-session actions ───────────────────────────────────────────────────────
 // A session is the set of channel files opened at the same instant, which is
@@ -1198,7 +1297,9 @@ function downloadGroup(key){
   runExport(names,sessionArchiveName(key));
 }
 function deleteGroup(key){
-  var names=(groupFiles[key]||[]).slice();
+  // The session's .csv files only: the serial mirror is in groupFiles for the archive,
+  // and the server deletes nothing but .csv.
+  var names=(groupFiles[key]||[]).filter(function(n){return /\.csv$/.test(n);});
   if(!names.length){ toast('Nothing to delete in that session',false); return; }
   var h=sessionHeading(key);
   if(!confirm('Delete all '+names.length+' file'+(names.length===1?'':'s')+' from '+h.local+'?'+
@@ -1474,14 +1575,17 @@ void webserver_init() {
     // under memory pressure — a low figure here alongside a broken page is the
     // evidence, and a healthy one rules the theory out.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         logPageRequest("/");
         webSendFlash(req, "text/html", PAGE_DASH, nullptr);
     });
     webServer.on("/setup", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         logPageRequest("/setup");
         webSendFlash(req, "text/html", PAGE_SETUP, nullptr);
     });
     webServer.on("/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         logPageRequest("/logs");
         webSendFlash(req, "text/html", PAGE_LOGS, nullptr);
     });
@@ -1518,6 +1622,7 @@ void webserver_init() {
 
     // ── /status — live telemetry snapshot ────────────────────────────────────
     webServer.on("/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         GnssData g_s{}; SystemStatus s_s{}; CanData c_s{};
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             g_s = gps; s_s = status; c_s = can;
@@ -1539,7 +1644,7 @@ void webserver_init() {
         // Device temp → °F for display; "--" when not yet read / sensor fault.
         char espTStr[12];
         snprintf(espTStr, sizeof(espTStr), isnan(s_s.espTempC) ? "--" : "%.1f", cToF(s_s.espTempC));
-        char json[1152];
+        char json[1280];
         snprintf(json, sizeof(json),
             "{\"wifi\":\"%s\",\"ssid\":\"%s\",\"ntrip\":\"%s\",\"mount\":\"%s\",\"base_km\":%.1f,\"rtk\":\"%s\","
             "\"diff_age\":%.1f,\"rtk_hold_s\":%d,"
@@ -1549,7 +1654,8 @@ void webserver_init() {
             "\"rpm\":\"%s\",\"tps\":\"%s\",\"oil_c\":\"%s\","
             "\"lat\":%.9f,\"lon\":%.9f,"
             "\"esp_temp_f\":\"%s\",\"reset\":\"%s\","
-            "\"rtcm_bytes\":%lu,\"heap\":%lu,\"heap_min\":%lu,\"heap_block_min\":%lu}",
+            "\"rtcm_bytes\":%lu,\"heap\":%lu,\"heap_min\":%lu,\"heap_block_min\":%lu,"
+            "\"heap_block\":%lu,\"rtk_inh\":%d,\"rtk_inh_why\":\"%s\"}",
             s_s.wifiConnected?"connected":s_s.wifiAttempting?"connecting":"---",
             s_s.wifiSSID,
             s_s.ntripConnected?"connected":"---",
@@ -1568,12 +1674,15 @@ void webserver_init() {
             espTStr, g_resetReasonStr,
             (unsigned long)rtcmBytesTotal,
             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-            (unsigned long)g_minFreeInternal, (unsigned long)g_minLargestBlock);
+            (unsigned long)g_minFreeInternal, (unsigned long)g_minLargestBlock,
+            (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            (int)s_s.rtkInhibit, rtkInhibitText(s_s.rtkInhibit));
         webSendBody(req, "application/json", json);
     });
 
     // ── /sd — SD card capacity + file count ──────────────────────────────────
     webServer.on("/sd", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         if (!sdlog_isReady()) {
             AsyncWebServerResponse* r = req->beginResponse(200, "application/json",
                 "{\"ready\":false,\"total\":0,\"used\":0,\"free\":0,\"files\":0,\"active\":false}");
@@ -1590,9 +1699,10 @@ void webserver_init() {
         char json[192];
         snprintf(json, sizeof(json),
             "{\"ready\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,"
-            "\"files\":%lu,\"active\":%s}",
+            "\"files\":%lu,\"write_faults\":%lu,\"active\":%s}",
             total, used, total > used ? total - used : 0ULL,
             (unsigned long)sdlog_getFileCount(),
+            (unsigned long)sdlog_getWriteFaults(),
             (sdlog_getActiveName() && sdlog_getActiveName()[0]) ? "true" : "false");
         AsyncWebServerResponse* r = req->beginResponse(200, "application/json", json);
         r->addHeader("Cache-Control", "no-store");
@@ -1606,6 +1716,8 @@ void webserver_init() {
     // sd_ready lets the browser distinguish "no files yet" from "SD is still
     // initialising"; total/offset drive paging in the all view.
     webServer.on("/files", HTTP_GET, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_LIST, crumb::W_IDLE);   // see breadcrumb.h
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
         if (!sdlog_isReady()) {
             AsyncWebServerResponse* r = req->beginResponse(200, "application/json",
                                                            "{\"sd_ready\":false,\"files\":[]}");
@@ -1649,9 +1761,9 @@ void webserver_init() {
         //    recording channel look like it isn't recording). The paged view
         //    below sources its rows from the snapshot instead, and uses this
         //    same set only to mark which of them are open.
-        char     anames[4][LOG_NAME_MAX];
-        uint32_t asizes[4];
-        int an = sdlog_getActiveFiles(anames, asizes, 4);
+        char     anames[5][LOG_NAME_MAX];
+        uint32_t asizes[5];
+        int an = sdlog_getActiveFiles(anames, asizes, 5);
         int total = 0;
         if (mode != MODE_ALL) {
             for (int i = 0; i < an; i++) {
@@ -1732,6 +1844,7 @@ void webserver_init() {
     // only in the browser is deliberate — the failure belongs to the endpoint,
     // not to one page's buttons.
     webServer.on("/log/*", HTTP_GET, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_READ, crumb::W_IDLE);   // see breadcrumb.h
         if (!sdlog_isReady()) {
             req->send(503, "text/plain", "SD not ready"); return;
         }
@@ -1758,14 +1871,21 @@ void webserver_init() {
         String fn = req->url().substring(5);
         if (!fn.startsWith("/")) fn = "/" + fn;
 
-        // Reject path traversal and anything but root .csv logs / the debug .txt.
+        // Reject path traversal and anything but root .csv logs, stored .tar archives
+        // and the debug .txt.
         // The debug file is deliberately allowed while still OPEN: this route never
         // takes sdMutex (see above) and reads only to the size its own handle saw,
         // so serving it cannot disturb the writer on sdLogTask.
-        bool allowed = fn.endsWith(".csv") ||
+        const bool isTar = fn.endsWith(".tar");
+        bool allowed = fn.endsWith(".csv") || isTar ||
                        (fn.startsWith("/debug_") && fn.endsWith(".txt"));
         if (!allowed || fn.indexOf('/', 1) >= 0) {
-            req->send(403, "text/plain", "Only root .csv or debug .txt files allowed"); return;
+            req->send(403, "text/plain", "Only root .csv, .tar or debug .txt files allowed"); return;
+        }
+        if (isTar) {
+            // An archive being built is a partial file until the build finishes.
+            int st = 0; sdlog_getExportState(&st, nullptr, nullptr);
+            if (st == 1) { req->send(409, "text/plain", "Archive is still being built"); return; }
         }
 
         // DlState owns the File; its destructor closes it when the response ends
@@ -1805,7 +1925,7 @@ void webserver_init() {
         req->client()->setNoDelay(true);
 
         String bare = fn.startsWith("/") ? fn.substring(1) : fn;
-        auto* resp = req->beginChunkedResponse("text/csv",
+        auto* resp = req->beginChunkedResponse(isTar ? "application/x-tar" : "text/csv",
             [state](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
                 // Streamed SD reads run in the async_tcp task. Each chunk is a
                 // single bounded read (fast), but on a busy/slow card a read can
@@ -1813,6 +1933,7 @@ void webserver_init() {
                 // task WDT each chunk so a transient stall can't abort the device
                 // (harmless no-op if async_tcp isn't WDT-subscribed).
                 esp_task_wdt_reset();
+                crumb::Scope crumbRead(crumb::SLOT_WEB, crumb::W_READ, crumb::W_IDLE);   // see breadcrumb.h
                 if (!state->file) return 0;
                 // Seek if the byte position diverged (e.g. range request retry)
                 if ((uint32_t)state->file.position() != (uint32_t)index)
@@ -1842,6 +1963,8 @@ void webserver_init() {
     // is fed between removes for the same reason /sd/deleteold does it — this
     // runs on the async_tcp task, which IS watchdog-subscribed.
     webServer.on("/log/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_DELETE, crumb::W_IDLE);   // see breadcrumb.h
+        RCX_USER_ACTION("files deleted from the web page");
         if (!sdlog_isReady()) { req->send(503, "text/plain", "SD not ready"); return; }
         if (g_activeDownloads > 0) {   // see the single-file delete guard below
             req->send(409, "text/plain", "Busy: a download is in progress"); return;
@@ -1851,8 +1974,8 @@ void webserver_init() {
         }
 
         // Split the comma-separated list, validating each name before it can
-        // reach SD_MMC: root .csv only, no path separators, never a file that is
-        // open for writing.
+        // reach SD_MMC: root .csv logs or .tar archives only, no path separators, never a
+        // file that is open for writing.
         String list = req->getParam("names", true)->value();
         std::vector<String> want;
         int start = 0;
@@ -1860,7 +1983,7 @@ void webserver_init() {
             int comma = list.indexOf(',', start);
             String nm = (comma < 0) ? list.substring(start) : list.substring(start, comma);
             nm.trim();
-            if (nm.length() && nm.endsWith(".csv") && nm.indexOf('/') < 0 && nm.indexOf('\\') < 0)
+            if (nm.length() && (nm.endsWith(".csv") || nm.endsWith(".tar")) && nm.indexOf('/') < 0 && nm.indexOf('\\') < 0)
                 want.push_back(nm);
             if (comma < 0) break;
             start = comma + 1;
@@ -1920,6 +2043,7 @@ void webserver_init() {
     });
 
     webServer.on("/log/*", HTTP_DELETE, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_DELETE, crumb::W_IDLE);   // see breadcrumb.h
         if (!sdlog_isReady()) {
             req->send(503, "text/plain", "SD not ready"); return;
         }
@@ -1929,8 +2053,8 @@ void webserver_init() {
         }
         String fn = req->url().substring(5);
         if (!fn.startsWith("/")) fn = "/" + fn;
-        if (!fn.endsWith(".csv") || fn.indexOf('/', 1) >= 0) {
-            req->send(400, "text/plain", "Only root .csv files may be deleted"); return;
+        if (!(fn.endsWith(".csv") || fn.endsWith(".tar")) || fn.indexOf('/', 1) >= 0) {
+            req->send(400, "text/plain", "Only root .csv logs and .tar archives may be deleted"); return;
         }
 
         // Refuse to delete a file that's open for WRITING right now — the four typed
@@ -1992,19 +2116,23 @@ void webserver_init() {
         if (req->hasParam("imu")) { im = req->getParam("imu")->value() != "0"; changed = true; }
         if (req->hasParam("can")) { c  = req->getParam("can")->value() != "0"; changed = true; }
         if (req->hasParam("sat")) { s  = req->getParam("sat")->value() != "0"; changed = true; }
+        // Raw receiver capture (debug) has its own setter: it is not one of the
+        // four channels a sniffer start or a full config write sets together.
+        if (req->hasParam("nmea")) {
+            sdlog_setLogNmea(req->getParam("nmea")->value() != "0");
+            if (!changed) {
+                AsyncWebServerResponse* r = req->beginResponse(200, "application/json", "{\"ok\":true}");
+                r->addHeader("Cache-Control", "no-store");
+                req->send(r); return;
+            }
+        }
 
         if (changed) {
-            // NOTE: the sniffer and log channels MAY now run together (see the
-            // force path in /can/sniff — concurrent capture for vehicle-dynamics
-            // channel discovery). So enabling a log channel no longer force-drops
-            // the sniffer; that would have silently ended a deliberate concurrent
-            // run. The throughput trade-off is the user's to make: to go back to
-            // sniffer-only, toggle the sniffer off explicitly. The default entry
-            // into sniffing is still exclusive unless force=1 is passed.
+            // The sniffer and the log channels run independently: a channel change never
+            // touches the sniffer.
             // sd_log is the sole NVS owner for "rcx_log" — sdlog_setConfig() sets
             // the live volatile flags and writes to NVS in one call.
             sdlog_setConfig(g, im, c, s);
-            Serial.printf("🌐 Log config: GPS=%d IMU=%d CAN=%d SAT=%d\n", g, im, c, s);
             AsyncWebServerResponse* r = req->beginResponse(200, "application/json", "{\"ok\":true}");
             r->addHeader("Cache-Control", "no-store");
             req->send(r); return;
@@ -2014,13 +2142,14 @@ void webserver_init() {
         // four flags describe the channel set that WILL run, which during a pause
         // is not the same as what is recording; without it the switches would
         // imply logging is active when it is not.
-        char json[128];
+        char json[144];
         snprintf(json, sizeof(json),
-                 "{\"gps\":%s,\"imu\":%s,\"can\":%s,\"sat\":%s,\"paused\":%s}",
+                 "{\"gps\":%s,\"imu\":%s,\"can\":%s,\"sat\":%s,\"nmea\":%s,\"paused\":%s}",
                  sdlog_getLogGps() ? "true" : "false",
                  sdlog_getLogImu() ? "true" : "false",
                  sdlog_getLogCan() ? "true" : "false",
                  sdlog_getLogSat() ? "true" : "false",
+                 sdlog_getLogNmea() ? "true" : "false",
                  sdlog_isPaused()  ? "true" : "false");
         AsyncWebServerResponse* r = req->beginResponse(200, "application/json", json);
         r->addHeader("Cache-Control", "no-store");
@@ -2039,7 +2168,6 @@ void webserver_init() {
         if (req->hasParam("on")) {
             bool on = req->getParam("on")->value() != "0";
             sdlog_setPaused(on);
-            Serial.printf("🌐 Log pause: %s\n", on ? "paused" : "running");
         }
         char json[32];
         snprintf(json, sizeof(json), "{\"paused\":%s}", sdlog_isPaused() ? "true" : "false");
@@ -2072,7 +2200,7 @@ void webserver_init() {
     // ── /imu/cal GET — current calibration state ───────────────────────────────
     // ── /imu/cal POST — start or clear (param: action=start|clear) ─────────────
     // Bias capture itself is non-blocking (imu.h): start arms it, samples are
-    // gathered inline in the normal 50 Hz imu_read() calls over ~2 s, then the
+    // gathered inline in the 50 Hz imu_read() calls of a capture over ~2 s, then the
     // result lands here on the next poll. Unit must be stationary and resting
     // flat (one axis along gravity) for the ~2 s capture — moving it fails the
     // capture (state goes to "failed") rather than storing a bad bias.
@@ -2103,6 +2231,7 @@ void webserver_init() {
     // learns this firmware build wasn't compiled with DEBUG_SERIAL_TO_SD and hides
     // the row, rather than showing a checkbox that silently does nothing.
     webServer.on("/debug_log", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("debug mirror setting changed");
 #if defined(DEBUG_SERIAL_TO_SD) && DEBUG_SERIAL_TO_SD
         if (req->hasParam("en")) {
             DebugLog::setEnabled(req->getParam("en")->value() != "0");
@@ -2160,6 +2289,8 @@ void webserver_init() {
 
     // ── /sd/deleteold POST — bulk delete all non-active CSV files ────────────
     webServer.on("/sd/deleteold", HTTP_POST, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_DELETE, crumb::W_IDLE);   // see breadcrumb.h
+        RCX_USER_ACTION("old files deleted from the web page");
         if (!sdlog_isReady()) {
             req->send(503, "text/plain", "SD not ready"); return;
         }
@@ -2216,16 +2347,24 @@ void webserver_init() {
     // ── /export/build POST — queue a tar build (runs in sdLogTask) ───────────
     // Body optionally carries names=a.csv,b.csv,... to build only that set;
     // omitted or empty builds every .csv on the card ("download all"). It may
-    // also carry file=<name>.tar to name the download, which is how a session
+    // also carry file=<name>.tar to name the stored archive, which is how a session
     // archive gets a stamp in the browser's own timezone — the device clock is
-    // GPS UTC and has no idea what timezone the operator is standing in.
+    // GPS UTC and has no idea what timezone the operator is standing in. The archive
+    // stays on the card under that name and is listed, downloaded and deleted like
+    // a log file.
     webServer.on("/export/build", HTTP_POST, [](AsyncWebServerRequest* req) {
+        crumb::Scope crumbScope(crumb::SLOT_WEB, crumb::W_EXPORT, crumb::W_IDLE);   // see breadcrumb.h
+        RCX_USER_ACTION("export archive requested");
         if (!sdlog_isReady()) { req->send(503, "text/plain", "SD not ready"); return; }
+        if (g_activeDownloads > 0) {   // the build replaces a same-named archive; never under an open read
+            req->send(409, "text/plain", "Busy: a download is in progress"); return;
+        }
         String names;   // kept alive through the call below; sdlog_requestExport copies it
         if (req->hasParam("names", true)) names = req->getParam("names", true)->value();
         exportFileName[0] = '\0';
         if (req->hasParam("file", true)) setExportFileName(req->getParam("file", true)->value());
-        sdlog_requestExport(names.length() ? names.c_str() : nullptr);
+        sdlog_requestExport(names.length() ? names.c_str() : nullptr,
+                            exportFileName[0] ? exportFileName : nullptr);
         AsyncWebServerResponse* r = req->beginResponse(200, "application/json", "{\"building\":true}");
         r->addHeader("Cache-Control", "no-store");
         req->send(r);
@@ -2236,15 +2375,17 @@ void webserver_init() {
         int st = 0; uint64_t sz = 0; int cnt = 0;
         sdlog_getExportState(&st, &sz, &cnt);
         const char* s = (st == 2) ? "ready" : (st == 1) ? "building" : (st == 3) ? "error" : "idle";
-        char json[96];
-        snprintf(json, sizeof(json), "{\"state\":\"%s\",\"size\":%llu,\"count\":%d}",
-                 s, (unsigned long long)sz, cnt);
+        char json[128];
+        snprintf(json, sizeof(json), "{\"state\":\"%s\",\"size\":%llu,\"count\":%d,\"name\":\"%s\"}",
+                 s, (unsigned long long)sz, cnt, sdlog_getExportPath() + 1);
         AsyncWebServerResponse* r = req->beginResponse(200, "application/json", json);
         r->addHeader("Cache-Control", "no-store");
         req->send(r);
     });
 
-    // ── /export.tar GET — stream the prebuilt archive ────────────────────────
+    // ── /export.tar GET — stream the most recently built archive ─────────────
+    // The same archive is also served from /log/<name>.tar, which keeps working
+    // after a later build and is what the file list links to.
     // Streams ONE existing file via the same WDT-fed chunk reader as /log/* — the
     // multi-file scan/assembly already happened in sdLogTask, so nothing heavy
     // runs in this callback.
@@ -2275,15 +2416,14 @@ void webserver_init() {
         auto* resp = req->beginChunkedResponse("application/x-tar",
             [state](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
                 esp_task_wdt_reset();
+                crumb::Scope crumbRead(crumb::SLOT_WEB, crumb::W_READ, crumb::W_IDLE);   // see breadcrumb.h
                 if (!state->file) return 0;
                 if ((uint32_t)state->file.position() != (uint32_t)index)
                     state->file.seek((uint32_t)index);
                 return state->file.read(buf, maxLen);
             });
         String disposition = "attachment; filename=\"";
-        if (exportFileName[0])          disposition += exportFileName;
-        else if (sdlog_exportIsSubset()) disposition += "rcx_logs_selected.tar";
-        else                             disposition += "rcx_logs.tar";
+        disposition += (sdlog_getExportPath() + 1);   // the stored name, without its leading slash
         disposition += "\"";
         resp->addHeader("Content-Disposition", disposition);
         resp->addHeader("Cache-Control", "no-store");
@@ -2294,21 +2434,8 @@ void webserver_init() {
     webServer.on("/can/sniff", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (req->hasParam("on")) {
             bool on = req->getParam("on")->value() != "0";
-            // EXCLUSIVITY (default, for stability): the canraw sniffer logs EVERY
-            // frame on the bus (500 kbps → thousands/sec). Stacked on gps/can/imu/
-            // sat writes that can outrun the SD card's sustained rate and back up
-            // queues until frames drop. It is NOT a corruption risk — the branches
-            // and queues are disjoint — only a throughput risk. So by default we
-            // still force the log channels off when the sniffer turns on.
-            //
-            // force=1 OVERRIDE: keep the logging channels running alongside the
-            // sniffer. Used to capture GPS/IMU/CAN and raw frames at once for
-            // vehicle-dynamics channel discovery. The web UI gates this behind a
-            // confirm dialog that spells out the SD-throughput trade-off, so the
-            // user is accepting possible dropped frames knowingly. Watch the
-            // sniffer 'drops'/'overflow' counters (/can/snapshot) during such runs.
-            bool force = req->hasParam("force") && req->getParam("force")->value() != "0";
-            if (on && !force) sdlog_setConfig(false, false, false, false);
+            // The sniffer runs alongside the gps/can/imu/sat channels: separate queues, files
+            // and file buffers. Its drop counter (/can/snapshot "drops") shows any shortfall.
             can_setSniffer(on);
         }
         char json[24];
@@ -2360,10 +2487,11 @@ void webserver_init() {
     // is acceptable for a deliberate operator action in the paddock, but it is
     // the reason none of this is called automatically or on a timer.
     webServer.on("/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
-        String j = "{\"ap\":\"" + String(wifi_deviceName()) + "\",\"apip\":\""
+        wifi_noteWebActivity();   // dashboard in use: the AP station search stands aside
+        String j = "{\"ap\":\"" + jsonEscape(wifi_deviceName()) + "\",\"apip\":\""
                  + String(wifi_apIp()) + "\",\"active\":\"";
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            if (status.wifiConnected) j += status.wifiSSID;
+            if (status.wifiConnected) j += jsonEscape(status.wifiSSID);
             xSemaphoreGive(dataMutex);
         }
         j += "\",\"max\":" + String(WIFI_MAX_NETWORKS) + ",\"nets\":[";
@@ -2427,6 +2555,7 @@ void webserver_init() {
     });
 
     webServer.on("/wifi/enable", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("WiFi network enabled/disabled");
         if (!req->hasParam("i", true) || !req->hasParam("on", true)) {
             req->send(400, "text/plain", "missing i/on");
             return;
@@ -2495,19 +2624,21 @@ void webserver_init() {
         });
 
     webServer.on("/dbc/select", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("DBC selected");
         String n = req->hasParam("name", true) ? req->getParam("name", true)->value() : String();
         if (!dbc_setActive(n.c_str())) { req->send(400, "text/plain", "Invalid filename."); return; }
         req->send(200, "text/plain", dbc_lastStatus());
     });
 
     webServer.on("/dbc/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("DBC deleted");
         String n = req->hasParam("name", true) ? req->getParam("name", true)->value() : String();
         if (!dbc_requestDelete(n.c_str())) { req->send(400, "text/plain", "Invalid filename or busy."); return; }
         req->send(200, "text/plain", "Deleting\u2026");
     });
 
     webServer.on("/casters", HTTP_GET, [](AsyncWebServerRequest* req) {
-        String j = "{\"max\":" + String(NTRIP_MAX_CASTERS) + ",\"list\":[";
+        String j = "{\"max\":" + String(NTRIP_MAX_CASTERS) + ",\"pending\":" + (ntrip_casterReloadPending() ? "true" : "false") + ",\"list\":[";
         const int n = ntrip_casterCount();
         for (int i = 0; i < n; i++) {
             NtripCasterInfo c;
@@ -2527,6 +2658,7 @@ void webserver_init() {
     });
 
     webServer.on("/casters/enable", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("NTRIP caster enabled/disabled");
         if (!req->hasParam("i", true) || !req->hasParam("on", true)) {
             req->send(400, "text/plain", "missing i/on");
             return;
@@ -2537,6 +2669,7 @@ void webserver_init() {
     });
 
     webServer.on("/casters/add", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("NTRIP caster added");
         if (!req->hasParam("host", true)) { req->send(400, "text/plain", "missing host"); return; }
         const String host  = req->getParam("host", true)->value();
         const String port  = req->hasParam("port",  true) ? req->getParam("port",  true)->value() : String("2101");
@@ -2557,6 +2690,7 @@ void webserver_init() {
     });
 
     webServer.on("/casters/reset", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("NTRIP casters reset");
         // Raises a flag consumed inside ntrip_loop() on wifiNtripTask — no
         // NTRIP state is touched from this (async_tcp) task.
         ntrip_requestReset();
@@ -2564,6 +2698,7 @@ void webserver_init() {
     });
 
     webServer.on("/casters/remove", HTTP_POST, [](AsyncWebServerRequest* req) {
+        RCX_USER_ACTION("NTRIP caster removed");
         if (!req->hasParam("i", true)) { req->send(400, "text/plain", "missing i"); return; }
         const int i = req->getParam("i", true)->value().toInt();
         // Call once: the list is rebuilt around the removal, so a repeat call

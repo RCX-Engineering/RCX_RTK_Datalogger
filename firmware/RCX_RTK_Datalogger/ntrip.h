@@ -18,7 +18,9 @@
 #include <WiFiClient.h>
 #include "types.h"
 
-enum NtripConnResult { NTRIP_OK, NTRIP_FAIL, NTRIP_STALE };
+// NTRIP_NETFAIL: the request never reached a caster (TCP connect / DNS failed) —
+// a network outage, not a caster refusal; see NTRIP_NET_RETRY_MS.
+enum NtripConnResult { NTRIP_OK, NTRIP_FAIL, NTRIP_STALE, NTRIP_NETFAIL, NTRIP_NOLINK };   // NOLINK: no WiFi address, nothing was dialled
 
 // One-time setup — resets state
 void ntrip_init();
@@ -27,6 +29,7 @@ void ntrip_init();
 // caster table immediately, so it is counted and scanned without a reboot. Returns
 // false if the host is empty or the table is already full (NTRIP_MAX_CASTERS).
 // host/port/user/pass/prefMpt are copied; prefMpt "" = auto-select nearest mountpoint.
+bool ntrip_casterReloadPending();   // list changed, table not yet rebuilt
 bool ntrip_saveCaster(const char* host, const char* port,
                       const char* user, const char* pass, const char* prefMpt);
 
@@ -85,6 +88,10 @@ void ntrip_requestReset();
 // the client reconnects with a single GET (no source-table fetch — avoids
 // hammering the caster). Triggers one prompt reconnect attempt on restore.
 void ntrip_onWifiLost();
+// The station link is back (address held). Clears every back-off, failure count and cooldown that
+// built up while it was away, so corrections resume at once. The per-caster source-table budget
+// is deliberately not cleared.
+void ntrip_onWifiUp();
 
 // Running total of RTCM bytes forwarded to the LG290P. Zero = no corrections
 // flowing (caster not sending, or header drain bug). Non-zero = bytes reaching GPS.

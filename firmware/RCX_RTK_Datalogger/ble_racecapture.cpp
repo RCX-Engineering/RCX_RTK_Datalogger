@@ -146,6 +146,9 @@
  *   Altitude in ft (m*3.28084) — unit declared EXPLICITLY as "ft", same reason.
  *   GPSDOP: we send hAccM (horizontal accuracy in metres) as a DOP proxy —
  *   the LG290P does not output a separate DOP sentence in the default config.
+ *   Sent and declared to 3 decimals (millimetres): RTK FIXED reports 1-3 cm,
+ *   which one decimal flattens to 0.0, so a 1 cm fix and a 4 cm fix would
+ *   read the same downstream.
  *   GPSQual: firmware GpsSignalQuality enum — 0=no fix, 1=2D, 2=3D, 3=DGNSS/RTK.
  *
  * IMU CHANNELS 15-18: always populated (IMU is always running; NaN on I2C
@@ -183,6 +186,7 @@
 #include <NimBLEDevice.h>
 #include <esp_heap_caps.h>   // PSRAM allocation for the BLE TX message slot
 #include <math.h>
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 // ── NUS UUIDs ─────────────────────────────────────────────────────────────────
 #define NUS_SERVICE  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -273,13 +277,20 @@ static const BleChannel kCh[] = {
     // unitless-mangle hazard. If you prefer metric, switch to value g.altMSL
     // (no *3.28084) AND ut="m" together — never an empty unit.
     {"Altitude",      "ft",      0,         13000,     1, 20},
-    {"GPSSats",       "",        0,            20,     0,  1},
-    {"GPSDOP",        "",        0,            20,     1,  1},
+    // GPSSats max is the GGA field's own 2-digit ceiling: the LG290P routinely
+    // uses 25-35 satellites, which a max of 20 would declare out of range.
+    {"GPSSats",       "",        0,            99,     0,  1},
+    {"GPSDOP",        "",        0,            20,     3,  1},   // hAcc, metres to the mm
     {"GPSQual",       "",        0,             5,     0,  1},
-    {"AccelX",        "G",      -3,             3,     2, 20},
-    {"AccelY",        "G",      -3,             3,     2, 20},
-    {"AccelZ",        "G",      -3,             3,     2, 20},
-    {"Yaw",           "Deg/Sec",-120,         120,     0, 20},
+    // PRECISION RULE for every channel below: send at least the source's own
+    // resolution, so no two distinct readings collapse to one value downstream.
+    // IMU: one count is 0.000244 g / 0.0156 deg/s, so 4 and 2 decimals. CAN:
+    // vehicle speed 0.01 km/h on the 987 (3 decimals in mph), wheel speeds
+    // 0.02-0.10 km/h (2), steering 0.045-0.1 deg (2), 718 yaw 0.01 deg/s (2).
+    {"AccelX",        "G",      -3,             3,     4, 20},
+    {"AccelY",        "G",      -3,             3,     4, 20},
+    {"AccelZ",        "G",      -3,             3,     4, 20},
+    {"Yaw",           "Deg/Sec",-120,         120,     2, 20},
     // ── CAN channels — ENGLISH UNITS, RaceCapture-standard naming ─────────────
     // RULES (enforced; do not violate without re-checking against firmware):
     //   • Label length: RaceCapture firmware char label[12] with
@@ -300,18 +311,18 @@ static const BleChannel kCh[] = {
     {"PedalPos",     "%",       0,     100,  1, 20},  // driver accelerator pedal request / PPS
     {"TgtTorque",    "%",       0,     100,  1, 20},  // 987.2 0x246 candidate (was TargetTorque)
     {"ActTorque",    "%",       0,     100,  1, 20},  // 987.2 0x246 candidate (was ActualTorque)
-    {"VehicleSpd",   "mph",     0,     200,  1, 20},  // vehicle speed, kph→mph (was VehicleSpeed/kph)
+    {"VehicleSpd",   "mph",     0,     200,  3, 20},  // vehicle speed, kph→mph (was VehicleSpeed/kph)
     {"CoolantTmp",   "F",     -40,     300,  1,  1},  // coolant temp, C→F (was CoolantTemp/C)
     {"OilTemp",      "F",     -40,     300,  1,  1},  // oil temp, C→F
     {"OilPress",     "psi",     0,     145,  2,  5},  // oil pressure, bar→psi
     {"Brake",        "psi",     0,    2900,  1, 20},  // brake pressure, bar→psi (200 bar≈2900 psi)
     {"BrakeSw",      "",        0,       1,  0, 20},  // brake switch 0/1 (was BrakeSwitch)
     {"BrakeSw2",     "",        0,       1,  0, 20},  // second brake switch (was BrakeSwitch2)
-    {"WheelSpdLF",   "mph",     0,     200,  1, 20},  // wheel speed, kph→mph
-    {"WheelSpdRF",   "mph",     0,     200,  1, 20},
-    {"WheelSpdLR",   "mph",     0,     200,  1, 20},
-    {"WheelSpdRR",   "mph",     0,     200,  1, 20},
-    {"Steering",     "Deg",  -600,     600,  1, 20},  // steering angle
+    {"WheelSpdLF",   "mph",     0,     200,  2, 20},  // wheel speed, kph→mph
+    {"WheelSpdRF",   "mph",     0,     200,  2, 20},
+    {"WheelSpdLR",   "mph",     0,     200,  2, 20},
+    {"WheelSpdRR",   "mph",     0,     200,  2, 20},
+    {"Steering",     "Deg",  -600,     600,  2, 20},  // steering angle
     {"SteerRate",    "Deg/Sec", -2000, 2000, 1, 20},  // steering rate (was SteeringRate)
     {"FuelLevel",    "L",       0,     127,  0,  1},  // fuel level — 718 sends LITERS (7-bit 0-127); 987 unresolved (NaN)
     {"Kickdown",     "",        0,       1,  0, 20},  // kickdown 0/1
@@ -327,7 +338,7 @@ static const BleChannel kCh[] = {
     {"MAF",          "g/s",     0,    1000,  1, 20},  // absent until passive ID is identified
     {"CANLatG",      "G",      -3,       3,  3, 20},
     {"CANLongG",     "G",      -3,       3,  3, 20},
-    {"CANYaw",       "Deg/Sec", -250,   250,  1, 20},
+    {"CANYaw",       "Deg/Sec", -250,   250,  2, 20},
     {"ClutchPos",    "%",       0,     100,  1, 20},
     {"OutsideTmp",   "F",     -60,     160,  1,  1},
     {"Odometer",     "mi",      0,  700000,  1,  1},
@@ -659,11 +670,14 @@ static void sendSample(const GnssData& g, const ImuData& m, const CanData& c) {
     // GPS channels — prec 9 = 0.11 mm lat / 0.09 mm lon (LG290P NMEA ceiling)
     ch(gpsOk, g.latitude,              9);
     ch(gpsOk, g.longitude,             9);
-    ch(gpsOk, g.speedKnots * 1.15078,  2);  // knots → mph (channel unit "mph" — NOT empty)
-    ch(gpsOk, g.headingDeg,            1);
+    // Speed/heading only while gnss.cpp holds a CURRENT value (receiver or RTK
+    // track). Omitted otherwise — SoloStorm interpolates a gap; a frozen value it
+    // would plot as real.
+    ch(gpsOk && g.speedValid,   g.speedKnots * 1.15078,  2);  // knots → mph (channel unit "mph" — NOT empty)
+    ch(gpsOk && g.headingValid, g.headingDeg,            1);
     ch(gpsOk, g.altMSL * 3.28084,      1);  // m → ft (channel unit "ft" — NOT empty)
     ch(gpsOk, (double)g.numSV,         0);
-    ch(gpsOk, g.hAccM,                 1);  // horizontal accuracy as GPSDOP proxy
+    ch(gpsOk, g.hAccM,                 3);  // horizontal accuracy as GPSDOP proxy, mm resolution
 
     {   // GPSQual — firmware GpsSignalQuality enum: 0=no fix, 1=2D, 2=3D, 3=DGNSS/RTK
         double q = 0.0;
@@ -675,11 +689,11 @@ static void sendSample(const GnssData& g, const ImuData& m, const CanData& c) {
         ch(gpsOk, q, 0);
     }
 
-    // IMU — AccelX/Y/Z in G (prec 2); Yaw in Deg/Sec (prec 0 per firmware meta)
-    ch(true, m.ax, 2);
-    ch(true, m.ay, 2);
-    ch(true, m.az, 2);
-    ch(true, m.gz, 0);
+    // IMU — AccelX/Y/Z in G (prec 4); Yaw in Deg/Sec (prec 2): full sensor resolution
+    ch(true, m.ax, 4);
+    ch(true, m.ay, 4);
+    ch(true, m.az, 4);
+    ch(true, m.gz, 2);
 
     // ── CAN channels — values converted METRIC → ENGLISH to match the meta ────
     // CanData is metric (decoders unchanged); convert here via the helpers in
@@ -699,18 +713,18 @@ static void sendSample(const GnssData& g, const ImuData& m, const CanData& c) {
     ch(!isnan(c.pedalRequestedPct),  c.pedalRequestedPct,             1);
     ch(!isnan(c.targetTorquePct),    c.targetTorquePct,               1);
     ch(!isnan(c.actualTorquePct),    c.actualTorquePct,               1);
-    ch(!isnan(c.vehicleSpeedKph),    kphToMph(c.vehicleSpeedKph),     1);  // kph→mph
+    ch(!isnan(c.vehicleSpeedKph),    kphToMph(c.vehicleSpeedKph),     3);  // kph→mph
     ch(!isnan(c.coolantTempC),       cToF(c.coolantTempC),            1);  // °C→°F
     ch(!isnan(c.oilTempC),           cToF(c.oilTempC),                1);  // °C→°F
     ch(!isnan(c.oilPressBar),        barToPsi(c.oilPressBar),         2);  // bar→psi
     ch(!isnan(c.brakePressBar),      barToPsi(c.brakePressBar),       1);  // bar→psi
     ch(!isnan(c.brakeSwitch),        c.brakeSwitch,                   0);
     ch(!isnan(c.brakeSwitch2),       c.brakeSwitch2,                  0);
-    ch(!isnan(c.wsFL_kph),           kphToMph(c.wsFL_kph),            1);  // kph→mph
-    ch(!isnan(c.wsFR_kph),           kphToMph(c.wsFR_kph),            1);  // kph→mph
-    ch(!isnan(c.wsRL_kph),           kphToMph(c.wsRL_kph),            1);  // kph→mph
-    ch(!isnan(c.wsRR_kph),           kphToMph(c.wsRR_kph),            1);  // kph→mph
-    ch(!isnan(c.steerAngleDeg),      c.steerAngleDeg,                 1);
+    ch(!isnan(c.wsFL_kph),           kphToMph(c.wsFL_kph),            2);  // kph→mph
+    ch(!isnan(c.wsFR_kph),           kphToMph(c.wsFR_kph),            2);  // kph→mph
+    ch(!isnan(c.wsRL_kph),           kphToMph(c.wsRL_kph),            2);  // kph→mph
+    ch(!isnan(c.wsRR_kph),           kphToMph(c.wsRR_kph),            2);  // kph→mph
+    ch(!isnan(c.steerAngleDeg),      c.steerAngleDeg,                 2);
     ch(!isnan(c.steerRateDegPerSec), c.steerRateDegPerSec,            1);
     ch(!isnan(c.fuelLevel),          c.fuelLevel,                     0);  // 718 liters (integer)
     ch(!isnan(c.kickdown),           c.kickdown,                      0);
@@ -728,7 +742,7 @@ static void sendSample(const GnssData& g, const ImuData& m, const CanData& c) {
     ch(is718 && !isnan(x718.massAirFlowGps),         x718.massAirFlowGps,                    1);
     ch(is718 && !isnan(x718.canLateralAccelG),       x718.canLateralAccelG,                  3);
     ch(is718 && !isnan(x718.canLongitudinalAccelG),  x718.canLongitudinalAccelG,             3);
-    ch(is718 && !isnan(x718.canYawRateDegPerSec),    x718.canYawRateDegPerSec,               1);
+    ch(is718 && !isnan(x718.canYawRateDegPerSec),    x718.canYawRateDegPerSec,               2);
     ch(is718 && !isnan(x718.clutchPositionPercent),  x718.clutchPositionPercent,             1);
     ch(is718 && !isnan(x718.outsideTempC),           cToF(x718.outsideTempC),                1);
     ch(is718 && !isnan(x718.odometerKm),             x718.odometerKm * 0.621371f,            1);

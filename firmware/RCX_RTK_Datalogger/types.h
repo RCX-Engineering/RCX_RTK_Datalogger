@@ -48,9 +48,20 @@ struct GnssData {
     uint8_t  second      = 0;
     uint16_t millisecond = 0;        // sub-second from NMEA
     uint32_t timeUpdateMillis = 0;   // host millis() when GNSS time last updated
-    uint32_t velUpdateMillis  = 0;   // host millis() when speed/heading last committed (RMC).
-                                     // (millis() - velUpdateMillis) IS the speed-channel age:
-                                     // logged as spd_age_ms, available to BLE for validity.
+    uint32_t velUpdateMillis  = 0;   // host millis() when the RECEIVER last delivered a real
+                                     // velocity (RMC SOG present and not a held repeat).
+                                     // (millis() - velUpdateMillis) is logged as spd_age_ms:
+                                     // the age of the receiver's own velocity, whatever the
+                                     // published speed came from (see velSrc).
+    // Published velocity and where it came from (gnss.cpp "Velocity selection").
+    // speedKnots/headingDeg are only meaningful while speedValid/headingValid.
+    bool     speedValid       = false;
+    bool     headingValid     = false;
+    uint8_t  velSrc           = 3;   // 0 receiver; 1 RTK track (receiver SOG/COG empty);
+                                     // 2 RTK track (receiver repeated its last value);
+                                     // 3 none (receiver stale and the track unusable)
+    float    trkSpeedMps      = NAN; // track-derived speed every epoch (NAN = unusable) —
+    float    trkHeadingDeg    = NAN; // logged beside the receiver's for field validation
     uint32_t epochSeq         = 0;   // increments once per epoch, AFTER that epoch's RMC has
                                      // been applied → "epoch complete". sdlog_push_if_new()
                                      // keys on this instead of the timestamp so a row can no
@@ -109,6 +120,22 @@ struct CanData {
 };
 
 // ── System / connection status ───────────────────────────────────────────────
+// Why RTK cannot be started or kept, published by ntrip_loop and shown on the LCD, the status
+// LED and the dashboard. RTK_INH_NONE = nothing is holding it back.
+enum RtkInhibit : uint8_t {
+    RTK_INH_NONE      = 0,
+    RTK_INH_HEAP_SCAN = 1,   // internal RAM too low to select a mount; RTK is down
+    RTK_INH_HEAP_CRIT = 2    // internal RAM at the critical floor; a fresh session may not get buffers
+};
+static inline const char* rtkInhibitText(uint8_t r) {      // dashboard and serial wording
+    return r == RTK_INH_HEAP_SCAN ? "Low RAM - cannot start RTK"
+         : r == RTK_INH_HEAP_CRIT ? "RAM critical - RTK reconnect at risk" : "";
+}
+static inline const char* rtkInhibitLcd(uint8_t r) {       // LCD row, 14 characters at most
+    return r == RTK_INH_HEAP_SCAN ? "LOW RAM-NO RTK"
+         : r == RTK_INH_HEAP_CRIT ? "RAM CRITICAL" : "";
+}
+
 struct SystemStatus {
     bool     wifiConnected   = false;
     bool     wifiAttempting  = false;
@@ -123,6 +150,7 @@ struct SystemStatus {
     float    ntripDistanceKm = -1.0f;
     int8_t   ntripCarrier    = -1;   // -1=unknown 1=L1 2=L1+L2
     bool     ntripVRS        = false;
+    uint8_t  rtkInhibit      = RTK_INH_NONE;   // RtkInhibit; written by ntrip_loop
     float    blePacketHz     = 0.0f;
     float    gnssHz          = 0.0f;
     float    canHz           = 0.0f;  // measured CAN frame rate

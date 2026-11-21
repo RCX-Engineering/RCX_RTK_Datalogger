@@ -24,6 +24,7 @@
 #include "types.h"
 #include "can_porsche718_extra.h"
 #include <WiFi.h>
+#include "debug_log.h"   // Serial output also reaches the SD debug mirror
 
 #if defined(RACECAPTURE_ENABLE) && RACECAPTURE_ENABLE
 
@@ -131,14 +132,19 @@ static const RcChannel kChannels[RC_CHANNEL_COUNT] = {
     {"Speed",             "mph",   2,      0,      200,   20},
     {"Heading",           "Deg",   1,      0,      360,   20},
     {"Altitude",          "ft",    1,      0,    13000,   20},   // was "m" — now ft
-    {"GPSSats",           "",      0,      0,       20,    1},   // was "Satellites"
-    {"GPSDOP",            "",      1,      0,       20,    1},   // was "DOP"
+    {"GPSSats",           "",      0,      0,       99,    1},   // max = GGA's 2-digit field; 25-35 is normal
+    {"GPSDOP",            "",      3,      0,       20,    1},   // hAcc, metres to the mm
     {"GPSQual",           "",      0,      0,        5,    1},   // was "GPSQuality"
     // ── IMU (RaceCapture standard names) ─────────────────────────────────────
-    {"AccelX",            "G",     2,     -3,        3,   20},
-    {"AccelY",            "G",     2,     -3,        3,   20},
-    {"AccelZ",            "G",     2,     -3,        3,   20},
-    {"Yaw",               "Deg/Sec", 0, -120,      120,   20},
+    // PRECISION RULE for every channel below: send at least the source's own
+    // resolution, so no two distinct readings collapse to one value downstream.
+    // IMU: one count is 0.000244 g / 0.0156 deg/s, so 4 and 2 decimals. CAN:
+    // vehicle speed 0.01 km/h on the 987 (3 decimals in mph), wheel speeds
+    // 0.02-0.10 km/h (2), steering 0.045-0.1 deg (2), 718 yaw 0.01 deg/s (2).
+    {"AccelX",            "G",     4,     -3,        3,   20},
+    {"AccelY",            "G",     4,     -3,        3,   20},
+    {"AccelZ",            "G",     4,     -3,        3,   20},
+    {"Yaw",               "Deg/Sec", 2, -120,      120,   20},
     // ── CAN — ENGLISH units, names ≤11 chars, IDENTICAL to the BLE table in
     //    ble_racecapture.cpp and the SD CAN header in sd_log.cpp. Values are
     //    converted metric→English in fillSample() via the helpers in types.h.
@@ -151,18 +157,18 @@ static const RcChannel kChannels[RC_CHANNEL_COUNT] = {
     {"PedalPos",          "%",     1,      0,      100,   20},
     {"TgtTorque",         "%",     1,      0,      100,   20},
     {"ActTorque",         "%",     1,      0,      100,   20},
-    {"VehicleSpd",        "mph",   1,      0,      200,   20},
+    {"VehicleSpd",        "mph",   3,      0,      200,   20},
     {"CoolantTmp",        "F",     1,    -40,      300,    1},
     {"OilTemp",           "F",     1,    -40,      300,    1},
     {"OilPress",          "psi",   2,      0,      145,    5},
     {"Brake",             "psi",   1,      0,     2900,   20},
     {"BrakeSw",           "",      0,      0,        1,   20},
     {"BrakeSw2",          "",      0,      0,        1,   20},
-    {"WheelSpdLF",        "mph",   1,      0,      200,   20},
-    {"WheelSpdRF",        "mph",   1,      0,      200,   20},
-    {"WheelSpdLR",        "mph",   1,      0,      200,   20},
-    {"WheelSpdRR",        "mph",   1,      0,      200,   20},
-    {"Steering",          "Deg",   1,   -600,      600,   20},
+    {"WheelSpdLF",        "mph",   2,      0,      200,   20},
+    {"WheelSpdRF",        "mph",   2,      0,      200,   20},
+    {"WheelSpdLR",        "mph",   2,      0,      200,   20},
+    {"WheelSpdRR",        "mph",   2,      0,      200,   20},
+    {"Steering",          "Deg",   2,   -600,      600,   20},
     {"SteerRate",         "Deg/Sec", 1, -2000,     2000,   20},
     {"FuelLevel",         "L",     0,      0,      127,    1},  // 718 LITERS (0-127); 987 unresolved
     {"Kickdown",          "",      0,      0,        1,   20},
@@ -179,7 +185,7 @@ static const RcChannel kChannels[RC_CHANNEL_COUNT] = {
     {"MAF",               "g/s",   1,      0,     1000,   20},  // metadata only until passive ID is identified
     {"CANLatG",           "G",     3,     -3,        3,   20},
     {"CANLongG",          "G",     3,     -3,        3,   20},
-    {"CANYaw",            "Deg/Sec", 1, -250,      250,   20},
+    {"CANYaw",            "Deg/Sec", 2, -250,      250,   20},
     {"ClutchPos",         "%",     1,      0,      100,   20},
     {"OutsideTmp",        "F",     1,    -60,      160,    1},
     {"Odometer",          "mi",    1,      0,   700000,    1},
@@ -287,17 +293,17 @@ static void sendSample(uint32_t ms, const GnssData& g, const ImuData& m, const C
     // GPS — lat/lon kept as double so RTK-grade precision survives to the app
     ap(g.valid ? g.latitude  : NAN, 9); comma();
     ap(g.valid ? g.longitude : NAN, 9); comma();
-    ap(g.valid ? (g.speedKnots * 1.15078) : NAN, 2); comma();  // knots→mph
-    ap(g.valid ? g.headingDeg : NAN, 1); comma();
+    ap(g.valid && g.speedValid   ? (g.speedKnots * 1.15078) : NAN, 2); comma();  // knots→mph; null when not current
+    ap(g.valid && g.headingValid ? g.headingDeg : NAN, 1); comma();
     ap(g.valid ? (g.altMSL * 3.28084) : NAN, 1); comma();  // m→ft (meta unit "ft")
     ap(g.valid ? (double)g.numSV : NAN, 0); comma();
-    ap(g.valid ? g.hAccM      : NAN, 1); comma();  // GPSDOP proxy (hAcc metres)
+    ap(g.valid ? g.hAccM      : NAN, 3); comma();  // GPSDOP proxy (hAcc metres, mm resolution)
     ap(g.valid ? (double)g.rtkType : NAN, 0); comma();  // GPSQual
     // IMU
-    ap(m.ax, 2); comma();
-    ap(m.ay, 2); comma();
-    ap(m.az, 2); comma();
-    ap(m.gz, 0);  // Yaw rate (prec 0 to match meta)
+    ap(m.ax, 4); comma();
+    ap(m.ay, 4); comma();
+    ap(m.az, 4); comma();
+    ap(m.gz, 2);  // Yaw rate (prec matches meta)
     // ── CAN — converted METRIC → ENGLISH to match the meta (helpers in types.h).
     //    CanData stays metric; convert here so BLE/WiFi/SD all agree.
     //    The 718 broadcast field is accelerator-pedal position, not confirmed
@@ -313,18 +319,18 @@ static void sendSample(uint32_t ms, const GnssData& g, const ImuData& m, const C
     ap(c.pedalRequestedPct,          1); comma();
     ap(c.targetTorquePct,            1); comma();
     ap(c.actualTorquePct,            1); comma();
-    ap(kphToMph(c.vehicleSpeedKph),  1); comma();  // kph→mph
+    ap(kphToMph(c.vehicleSpeedKph),  3); comma();  // kph→mph
     ap(cToF(c.coolantTempC),         1); comma();  // °C→°F
     ap(cToF(c.oilTempC),             1); comma();  // °C→°F
     ap(barToPsi(c.oilPressBar),      2); comma();  // bar→psi
     ap(barToPsi(c.brakePressBar),    1); comma();  // bar→psi
     ap(c.brakeSwitch,                0); comma();
     ap(c.brakeSwitch2,               0); comma();
-    ap(kphToMph(c.wsFL_kph),         1); comma();  // kph→mph
-    ap(kphToMph(c.wsFR_kph),         1); comma();  // kph→mph
-    ap(kphToMph(c.wsRL_kph),         1); comma();  // kph→mph
-    ap(kphToMph(c.wsRR_kph),         1); comma();  // kph→mph
-    ap(c.steerAngleDeg,              1); comma();
+    ap(kphToMph(c.wsFL_kph),         2); comma();  // kph→mph
+    ap(kphToMph(c.wsFR_kph),         2); comma();  // kph→mph
+    ap(kphToMph(c.wsRL_kph),         2); comma();  // kph→mph
+    ap(kphToMph(c.wsRR_kph),         2); comma();  // kph→mph
+    ap(c.steerAngleDeg,              2); comma();
     ap(c.steerRateDegPerSec,         1); comma();
     ap(c.fuelLevel,                  0); comma();  // 718 liters (integer)
     ap(c.kickdown,                   0); comma();
@@ -340,7 +346,7 @@ static void sendSample(uint32_t ms, const GnssData& g, const ImuData& m, const C
     comma(); ap(is718 ? x718.massAirFlowGps : NAN,                    1);
     comma(); ap(is718 ? x718.canLateralAccelG : NAN,                  3);
     comma(); ap(is718 ? x718.canLongitudinalAccelG : NAN,             3);
-    comma(); ap(is718 ? x718.canYawRateDegPerSec : NAN,               1);
+    comma(); ap(is718 ? x718.canYawRateDegPerSec : NAN,               2);
     comma(); ap(is718 ? x718.clutchPositionPercent : NAN,             1);
     comma(); ap(is718 ? cToF(x718.outsideTempC) : NAN,                 1);
     comma(); ap(is718 ? x718.odometerKm * 0.621371f : NAN,             1);

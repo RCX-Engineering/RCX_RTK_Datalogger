@@ -5,7 +5,7 @@
 // WHY: the field failures we chase (NTRIP selection, reboots, thermal) only show
 // in the serial monitor, but you can't run a serial monitor from a phone in the
 // car. This tees Serial output to the SD card so you drive, then read the log
-// afterward. OFF by default (DEBUG_SERIAL_TO_SD in config.h) — zero cost when off.
+// afterward. Compiled in by default (DEBUG_SERIAL_TO_SD in config.h) and armed unless switched off on the web page — zero cost when off.
 //
 // DESIGN CONSTRAINTS (all forced by hard-won lessons in this codebase):
 //   • NEVER block the control loop. Serial already runs setTxTimeoutMs(0) because
@@ -46,6 +46,8 @@ public:
     }
     operator bool() { return (bool)Serial; }
     int availableForWrite() { return Serial.availableForWrite(); }
+    int available() { return Serial.available(); }   // console input (IMU calibration command) passes straight through
+    int read() { return Serial.read(); }
     void flush() { Serial.flush(); }
 };
 
@@ -70,6 +72,9 @@ namespace DebugLog {
 // inherited unchanged — no call site is edited. Placed AFTER any Serial.begin
 // in setup() would double-init, so the macro deliberately maps Serial→Debug and
 // DebugTee::begin(baud) forwards to the real Serial.begin.
+#ifdef Serial
+#undef Serial   // drop the core's own binding (HWCDCSerial / USBSerial / Serial0) before redirecting
+#endif
 #define Serial Debug
 
 #endif // DEBUG_SERIAL_TO_SD

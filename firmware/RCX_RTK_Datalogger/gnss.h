@@ -24,6 +24,17 @@ void gnss_init(HardwareSerial& serial);
 // under dataMutex, and fires SD log records if SD_LOG_ENABLE is set.
 void gnss_loop(HardwareSerial& serial);
 
+// Forward RTCM corrections to the receiver (NTRIP task). The only way RTCM may be
+// written to the GNSS UART: it shares the port with runtime PQTM commands, and
+// this path tracks RTCM frame boundaries so a command is never written inside a
+// frame. Never blocks inside the UART driver (see gnss.cpp).
+void gnss_forwardRtcm(HardwareSerial& serial, const uint8_t* data, size_t len);
+
+// A new NTRIP session is about to stream (call before its first forward). If the
+// previous session ended mid-frame, completes that frame so the receiver does not
+// read the new session's first bytes as the old frame's remainder.
+void gnss_rtcmStreamStart();
+
 // ── Tunable multipath/occlusion masks (defaults in config.h) ──────────────────
 // Current live values (from NVS, or config.h defaults on a fresh module).
 float gnss_getEleMask();     // elevation cutoff, degrees

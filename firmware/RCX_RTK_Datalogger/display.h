@@ -33,3 +33,8 @@ void display_update(const GnssData& g, const ImuData& m, const SystemStatus& s);
 // one wanting it off is enough to turn it off).
 void display_setEnabled(bool on);
 bool display_isEnabled();
+
+// True while the LCD is in cone survey mode (entered and left automatically by
+// the display task from the unit's orientation). Read-only for other modules:
+// the SD logger uses it to keep full-rate IMU logging during cone surveys.
+bool display_coneModeActive();

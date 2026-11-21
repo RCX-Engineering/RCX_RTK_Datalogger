@@ -5,8 +5,8 @@
  * Four separate log files, each independently toggleable from the web UI:
  *
  * gps_YYYYMMDD_HHMMSS.csv   — Position, RTK, NTRIP, accuracy  (20 Hz)
- * imu_YYYYMMDD_HHMMSS.csv   — Accel + Gyro                    (50 Hz)
- * can_YYYYMMDD_HHMMSS.csv   — RPM, speeds, temps, steering     (20 Hz)
+ * imu_YYYYMMDD_HHMMSS.csv   — Accel + Gyro                    (250 Hz moving, 1 Hz parked)
+ * can_YYYYMMDD_HHMMSS.csv   — RPM, speeds, temps, steering     (50 Hz moving, 1 Hz parked)
  * sat_YYYYMMDD_HHMMSS.csv   — Raw GSV NMEA (Satellites in view)(1 Hz)
  *
  * All files share the same timestamp base (first valid GPS fix).
@@ -17,18 +17,24 @@
 #include <freertos/semphr.h>
 #include "types.h"
 
-// IMU record pushed at 50 Hz independently of the GPS epoch.
+// IMU record pushed once per IMU sample (250 Hz while the car is active) independently of the GPS epoch.
 struct ImuLogRecord { uint32_t ms; float ax, ay, az, gx, gy, gz; };
 
 // SAT record for pushing raw NMEA sentences asynchronously
 struct SatLogRecord { uint32_t ms; char sentence[84]; };
+// Raw receiver output record (GGA/RMC as received). Sized for an RMC at 8-decimal
+// minutes, which runs past the 84 characters a GSV needs.
+struct NmeaLogRecord { uint32_t ms; char sentence[104]; };
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 void sdlog_init();          // creates mutex/queues, starts sdLogTask
 void sdlog_push_if_new();   // GPS + CAN snapshot (called from loop at 20 Hz)
 void sdlog_push_imu(float ax, float ay, float az,
-                    float gx, float gy, float gz);  // IMU snapshot (50 Hz)
+                    float gx, float gy, float gz);  // one IMU sample (250 Hz active, 1 Hz parked)
+void sdlog_push_can();      // decoded CAN snapshot; self-paced (50 Hz active, 1 Hz motionless); call per IMU sample
+bool sdlog_carActive();     // true while the car is moving or has moved within the motionless dwell
 void sdlog_push_sat(const char* nmeaString);        // Raw GSV string snapshot
+void sdlog_push_nmea(const char* nmeaString);       // Raw GGA/RMC as received (debug channel)
 
 void sdLogTask(void*);      // internal FreeRTOS task
 
@@ -44,7 +50,10 @@ bool              sdlog_isReady();
 #define LOG_NAME_MAX 40
 
 const char* sdlog_getActiveName();  // active GPS file, or "" if none
-uint32_t          sdlog_getFileCount();   // total files opened (no dir scan)
+void              sdlog_rawHold(bool hold);   // true: close the raw CAN log and keep it closed (frames queue); false: resume in a new file
+bool              sdlog_rawIsOpen();          // a raw CAN log file is open (and its staging buffer allocated)
+uint32_t          sdlog_getFileCount();   // .csv log files on the card (RAM snapshot, no SD access)
+uint32_t          sdlog_getWriteFaults(); // log files closed and reopened after a failed write, this boot
 uint32_t          sdlog_getActiveGpsSize(); // on-disk size (bytes) of the open GPS log
 
 // Currently-open ("active") files + live sizes for the file views — RAM only, no
@@ -56,6 +65,23 @@ int sdlog_getActiveFiles(char names[][LOG_NAME_MAX], uint32_t* sizes, int cap);
 // (any typed channel or the canraw sniffer dump). Web delete paths use this to
 // refuse removing a live file (removing an open file corrupts FatFs + resets).
 bool sdlog_isActiveFile(const char* bare);
+
+// ── The serial-mirror file (debug_log.cpp) ───────────────────────────────────
+// debug_<stamp>.txt is opened and written by debug_log.cpp, not by a log channel, so the
+// channels' own bookkeeping never sees it. These two calls give it the same standing as a
+// log file: it appears in the file listing the moment it opens, it is protected from a web
+// delete while it is open, and "download all" includes it. `bare` is the name without a
+// leading slash; `finalSize` is its size once closed.
+void sdlog_noteDebugFileOpen(const char* bare);
+void sdlog_noteDebugFileClosed(const char* bare, uint32_t finalSize);
+void sdlog_noteDebugFileSize(uint32_t bytes);   // live size while open, shown in the open-file view
+// True for the names the listing, the export and the file download carry: root .csv logs and
+// the serial mirror's debug_<stamp>.txt.
+bool sdlog_isLogFileName(const char* bare);
+// True for a stored export archive: a root-level name ending in .tar. Archives are kept on the card
+// after they are built so an interrupted download can be repeated from the file list. They are
+// listed, downloaded and deleted like log files, but are never members of a new archive.
+bool sdlog_isArchiveName(const char* bare);
 
 // ── Web dir-view snapshot (recent/all) — built by sdLogTask, read by webserver ─
 // The web handler MUST NOT enumerate the SD root itself (that overran the
@@ -113,16 +139,21 @@ void sdlog_getCapacity(uint64_t* total, uint64_t* used);
 // or when a sample gets logged.
 void sdlog_downloadBegin();
 void sdlog_downloadEnd();
+// True while any file download is streaming. The serial-to-SD mirror holds its writes
+// for that time (see DebugLog::drainToFile), so a download never competes with a writer.
+bool sdlog_downloadInProgress();
 
 // ── Bulk export (.tar) — built by sdLogTask, streamed by webserver ────────────
-// requestExport() queues a build of /export.tar (all CSVs); getExportState()
-// reports progress (0=idle 1=building 2=ready 3=error) + size + file count;
-// getExportPath() is the file the web streams once state==ready.
+// requestExport() queues a build of a stored archive (all logs, or a selection); getExportState()
+// reports progress (0=idle 1=building 2=ready 3=error) + size + file count; getExportPath() is the
+// archive's path on the card ("/<name>.tar"), which stays listed and downloadable after the build.
 // Queue a tar build in sdLogTask. namesCSV null/empty builds every .csv on the
 // card (the original "download all"); a comma-separated list of bare filenames
 // builds only those (skipping any that are missing or currently open for
 // writing). Bounded to EXPORT_SELECT_MAX names — see sd_log.cpp.
-void        sdlog_requestExport(const char* namesCSV = nullptr);
+// archiveName is the bare .tar filename to store the result under (rebuilding the same name replaces
+// it); null or invalid falls back to rcx_logs_all.tar / rcx_logs_sel.tar.
+void        sdlog_requestExport(const char* namesCSV = nullptr, const char* archiveName = nullptr);
 void        sdlog_getExportState(int* state, uint64_t* size, int* count);
 const char* sdlog_getExportPath();
 bool        sdlog_exportIsSubset();   // true if the last built export was a selection, not "all"
@@ -134,9 +165,18 @@ bool        sdlog_exportIsSubset();   // true if the last built export was a sel
 // frame is DROPPED and counted — it never blocks the CAN task or any other task.
 void     sdlog_push_can_raw(uint32_t ms, uint16_t id, uint8_t dlc, const uint8_t* data);
 uint32_t sdlog_getCanRawDrops();   // frames dropped because the raw queue was full
+uint32_t sdlog_getGpsRowDrops();   // GPS epochs not logged because the epoch queue was full
 
 // Atomically update all four flags and save to NVS.
 void sdlog_setConfig(bool logGps, bool logImu, bool logCan, bool logSat);
+
+// ── Raw receiver capture (debug) ─────────────────────────────────────────────
+// Off unless switched on from the dashboard. While on (and not paused), every GGA
+// and RMC line the receiver sends is written as received, checksum and all, to
+// nmea_<stamp>.csv (unix_ms,nmea_sentence) — the receiver's own words with no
+// parser in between, for debugging sessions. Persisted in NVS like the others.
+bool sdlog_getLogNmea();
+void sdlog_setLogNmea(bool on);
 
 // ── Master pause ─────────────────────────────────────────────────────────────
 // Pausing suspends every channel and closes the files they hold open, which is
