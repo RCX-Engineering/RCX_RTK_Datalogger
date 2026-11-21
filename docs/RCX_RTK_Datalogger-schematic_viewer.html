@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>KG Schematic Viewer</title>
+<title>RCX RTK Datalogger and Base: Interactive Hardware Knowledge Graph Model Viewer</title>
+<meta name="graph-revision" content="">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -213,6 +214,8 @@ ul.libs li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .picks { display: inline-flex; gap: 8px; flex-wrap: wrap; }
 .pick { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font: 500 12.5px/1 var(--font-cond); letter-spacing: .02em; color: var(--muted); }
 .pick select { border: 0; background: var(--surface-2); color: var(--ink); font: 600 12.5px var(--font-ui); padding: 4px 6px; border-radius: 5px; max-width: 260px; }
+.pick.is-na { opacity: .55; }
+.pick select:disabled { cursor: not-allowed; }
 .pick select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---- view switch and reference tables ---- */
@@ -252,7 +255,7 @@ ul.checks .count { margin-left: auto; }
 .schematic .finding-mark { fill: none; stroke: var(--err); stroke-width: 14; stroke-dasharray: 30 18; pointer-events: none; }
 </style>
 <style id="schematic-style">
-.schematic { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.schematic { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; text-rendering: geometricPrecision; }
 .schematic text { user-select: none; }
 .schematic .paper { fill: var(--paper); }
 .schematic .group-frame { fill: none; stroke: var(--group-line); stroke-width: 10; stroke-dasharray: 90 34 14 34; }
@@ -336,20 +339,15 @@ ul.checks .count { margin-left: auto; }
 <body>
 <div class="app">
   <header class="bar">
-    <div class="brand" aria-hidden="true">
-      <svg viewBox="0 0 34 26"><rect x="9" y="3" width="16" height="20" rx="1" fill="var(--sym-fill)" stroke="var(--sym-line)" stroke-width="1.6"/><path d="M1 8h8M1 18h8M25 8h8M25 18h8" stroke="var(--sym-line)" stroke-width="1.6"/><circle cx="1.6" cy="8" r="1.4" fill="var(--wire-k)"/><circle cx="32.4" cy="18" r="1.4" fill="var(--wire-k)"/></svg>
-      <span class="brand-name">KG Schematic Viewer</span>
-    </div>
-    <div class="doc"><h1 id="doc-title">Loading graph…</h1><div class="stats" id="stats"></div></div>
+    <div class="doc"><h1 id="doc-title">RCX RTK Datalogger and Base: Interactive Hardware Knowledge Graph Model Viewer</h1></div>
   </header>
 
   <div class="toolbar" role="toolbar" aria-label="Drawing options">
     <div class="segmented" role="group" aria-label="View"><button type="button" data-view="drawing" aria-pressed="true">Drawing</button><button type="button" data-view="tables" aria-pressed="false">Tables</button></div>
     <label class="toggle" title="Draw pins where the graph locates them: header side and order, or millimetre coordinates on a part drawn to scale"><input type="checkbox" id="opt-physical">Physical pin locations</label>
-    <label class="toggle" title="Draw wires in the colours recorded on each connection; off uses KiCad green"><input type="checkbox" id="opt-colours">Wire colours</label>
+    <label class="toggle" title="Colour code and gauge written on each wire"><input type="checkbox" id="opt-wiretags">Wire colors</label>
     <label class="toggle" title="Show pins that have nothing connected"><input type="checkbox" id="opt-unconnected">Unconnected pins</label>
-    <label class="toggle"><input type="checkbox" id="opt-netlabels">Net labels</label>
-    <label class="toggle" title="Colour code and gauge on each wire"><input type="checkbox" id="opt-wiretags">Wire tags</label>
+    <label class="toggle" title="Signal name written on each wire"><input type="checkbox" id="opt-netlabels">Wire Functions</label>
     <div class="picks" id="variant-picks" role="group" aria-label="Configuration" hidden></div>
     <span class="spacer"></span>
     <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l4 4" stroke="currentColor" stroke-width="1.6"/></svg><input id="search" type="search" placeholder="Find part, pin or net" aria-label="Find part, pin or net"></label>
@@ -404,31 +402,32 @@ ul.checks .count { margin-left: auto; }
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script type="text/x-cypher" id="graph-source" data-name="RCX_RTK_Datalogger_wiring.cypher">// RCX RTK Datalogger — wiring knowledge graph logical physics model
+<script type="text/x-cypher" id="graph-source" data-name="RCX_RTK_Datalogger_wiring.cypher">
+// RCX RTK Datalogger and RTK Base — wiring knowledge graph logical physics model
 
 CREATE (esp32:Device {id: 'esp32', name: 'ESP32-S3-LCD-1.47B', type: 'MCU board', manufacturer: 'Waveshare', input_power: '5V via onboard USB-C connector', logic_level: '3.3V', physical_position_status: 'partial: external-header side and order are captured; millimeter pin coordinates are not yet captured', notes: 'ESP32-S3 board with onboard LCD, SD card, IMU, USB-C power/data, and left and right external GPIO headers.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'controller', diagram_order: 10})
-CREATE (lg290p:Device {id: 'lg290p', name: 'LG290P RTK GNSS module', type: 'GNSS receiver', voltage_in: '3.3V', logic_level: '3.3V', physical_position_status: 'connector ownership is captured; pin order and millimeter coordinates are not yet captured', notes: 'GNSS module 3.3V and GND leads are doubled into the VCC and GND positions of the SN65 4-pin plug, which is fed from the ESP32 3-pin power plug. UART connector is physically on the GPS module; the harness plugs into it with a JST SH cable plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'gnss', diagram_order: 30})
-CREATE (sn65:Device {id: 'sn65', name: 'SN65HVD230 CAN transceiver module', type: 'CAN transceiver breakout', voltage_in: '3.3V', logic_level: '3.3V', can_physical_layer: 'ISO 11898-2 high-speed CAN', physical_position_status: 'dimensioned from user-supplied STEP/STL', coordinate_frame: 'sn65_component_side_xz_v1', cad_source_step: 'CAN Transiver SN65HVD230.step', cad_source_stl: 'CAN Transiver SN65HVD230.stl', assembly_size_x_mm: 32.4903, assembly_size_y_mm: 10.2756, assembly_height_mm: 13.7764, notes: '3.3V CAN transceiver used as receive interface for vehicle CAN. TXD is wired but firmware may operate in listen-only mode.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'can', diagram_order: 40})
-CREATE (fan:Device {id: 'fan', name: '5V cooling fan', type: 'two-wire DC brushless fan', voltage_in: '5V', leads: 2, lead_termination: 'flying leads, no connector at the fan', control: 'none; runs whenever the board 5V rail is live', notes: 'Powered from the USB VBUS rail: +5V lead in the 5V position and ground doubled into the GND position of the ESP32 3-pin power plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'thermal', diagram_order: 25})
+CREATE (lg290p:Device {id: 'lg290p', name: 'LG290P RTK GNSS module', type: 'GNSS receiver', voltage_in: '3.3V', logic_level: '3.3V', physical_position_status: 'connector ownership is captured; pin order and millimeter coordinates are not yet captured', notes: 'Fitted in both the RTK Datalogger and the RTK Base. In the Datalogger its 3.3V and GND leads are doubled into the VCC and GND positions of the SN65 4-pin plug, which is fed from the ESP32 3-pin power plug; in the Base they go straight to the 3V3 and GND positions of the ESP32 3-pin power plug. A lithium RTC backup battery plugs into its onboard 2-pin JST battery connector in both builds. UART connector is physically on the GPS module; the harness plugs into it with a JST SH cable plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'gnss', diagram_order: 30})
+CREATE (sn65:Device {id: 'sn65', variants: ['var_role_logger'], name: 'SN65HVD230 CAN transceiver module', type: 'CAN transceiver breakout', voltage_in: '3.3V', logic_level: '3.3V', can_physical_layer: 'ISO 11898-2 high-speed CAN', physical_position_status: 'dimensioned from user-supplied STEP/STL', coordinate_frame: 'sn65_component_side_xz_v1', cad_source_step: 'CAN Transiver SN65HVD230.step', cad_source_stl: 'CAN Transiver SN65HVD230.stl', assembly_size_x_mm: 32.4903, assembly_size_y_mm: 10.2756, assembly_height_mm: 13.7764, notes: '3.3V CAN transceiver used as receive interface for vehicle CAN. TXD is wired but firmware may operate in listen-only mode. Fitted in the RTK Datalogger only; the RTK Base has no CAN transceiver.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'can', diagram_order: 40})
+CREATE (fan:Device {id: 'fan', name: '5V cooling fan', type: 'two-wire DC brushless fan', voltage_in: '5V', leads: 2, lead_termination: 'leads hardwired inside the fan; no connector at the fan end', control: 'none; runs whenever the board 5V rail is live', notes: 'Powered from the USB VBUS rail: +5V lead in the 5V position and ground doubled into the GND position of the ESP32 3-pin power plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'thermal', diagram_order: 25})
 CREATE (esp32_usb_c:Connector {id: 'esp32_usb_c', name: 'ESP32 onboard USB-C connector', device: 'esp32', type: 'USB-C receptacle', role: '5V power input and native USB data (USB Serial/JTAG) for firmware upload and serial monitor', physical_location: 'top edge of ESP32 board', board_side: 'top', notes: 'External 5V USB-C power is applied here. D+ and D- run on-board to ESP32-S3 GPIO20 and GPIO19 (native USB, no USB-UART bridge); the Arduino IDE uploads and monitors through this port.', data_interface: 'native USB Serial/JTAG', data_pins: 'GPIO19 USB_D-, GPIO20 USB_D+', physical_model: 'Connector is physically mounted on and logically owned by the ESP32-S3 board.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', interface_exposure: 'external', external_interface: true, interface_type: 'power_usb', cover_label: 'USB-C / 5V INPUT', cover_order: 10, diagram_level: 'primary', diagram_group: 'external_interface', diagram_order: 15})
 CREATE (lg290p_uart_connector:Connector {id: 'lg290p_uart_connector', name: 'LG290P onboard UART connector', type: 'JST SH 1.0 mm 4-pin header', series: 'JST SH', positions: 4, nominal_pitch_mm: 1.0, user_gender: 'male header', identification: 'inferred from the Waveshare LG290P GNSS RTK Module documentation (UART on an SH1.0 4-pin connector); confirm against the board in hand', device: 'lg290p', pins: '3.3V, GND, TX, RX', notes: 'This connector is physically on the GPS module, not a separate inline harness connector.', physical_model: 'Connector is physically mounted on and logically owned by the LG290P module.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
-CREATE (sn65_logic_power_connector:Connector {id: 'sn65_logic_power_connector', name: 'SN65HVD230 4-pin logic/power header', type: '1x4 male pin header', user_gender: 'male header', device: 'sn65', positions: 4, nominal_pitch_mm: 2.54, measured_pitch_mm: 2.52, pins_component_side_top_to_bottom: ['VCC', 'GND', 'RXD', 'TXD'], physical_edge: 'logic-header end', contact_direction: '-X in sn65_component_side_xz_v1', notes: 'Carries 3.3V, ground, TWAI RXD, and TWAI TXD between the ESP32 header and the CAN transceiver module.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
-CREATE (can_logic_power_plug:Connector {id: 'can_logic_power_plug', name: 'SN65 4-pin logic/power plug', type: '4-position housing', user_gender: 'female housing', positions: 4, nominal_pitch_mm: 2.54, pins_top_to_bottom: ['VCC', 'GND', 'RXD', 'TXD'], notes: 'Plugs onto the SN65 1x4 logic/power header. The VCC and GND positions each hold two wires: the LG290P lead and the lead to the ESP32 3-pin power plug, which splices GPS power onto the CAN module supply.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'can', diagram_order: 38})
-CREATE (esp32_power_plug:Connector {id: 'esp32_power_plug', name: 'ESP32 3-pin power plug', type: '3-position housing', user_gender: 'female housing', positions: 3, nominal_pitch_mm: 2.54, notes: 'Plugs onto ESP32 left-header positions 1 to 3 (5V, GND, 3V3(OUT)) and carries all three power leads to the board. The GND position holds two wires: the ground lead from the SN65 4-pin plug and the fan ground.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'power', diagram_order: 12})
-CREATE (sn65_can_screw_terminal:Connector {id: 'sn65_can_screw_terminal', name: 'SN65HVD230 CAN screw terminal', type: '2-position PCB screw terminal', device: 'sn65', positions: 2, preferred_connection: false, position_1_signal: 'CANL', position_2_signal: 'CANH', component_side_order: 'CANL upper, CANH lower', measured_center_spacing_mm: 4.7390, notes: 'CANH and CANL screw terminals are electrically parallel with the nearby plated pads. Not used: the CAN pigtail plugs onto header pins fitted in the parallel pads.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
-CREATE (sn65_can_parallel_pads:Connector {id: 'sn65_can_parallel_pads', name: 'SN65HVD230 parallel CAN header', type: '1x2 male pin header in the parallel CAN pads', device: 'sn65', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'male header', preferred_connection: true, position_1_signal: 'CANL', position_2_signal: 'CANH', component_side_order: 'CANL upper, CANH lower', measured_center_spacing_mm: 2.52, notes: 'Male header pins in the plated pads that are electrically parallel with the CAN screw terminals. The transceiver CAN pigtail plugs on here for every vehicle.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
-CREATE (can_pigtail_socket:Connector {id: 'can_pigtail_socket', name: 'CAN pigtail Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the transceiver CAN pigtail', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Plugs onto the male header pins in the SN65 parallel CAN pads. Pin 1 is CANL; pin 2 is CANH.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', interface_exposure: 'external', external_interface: true, interface_type: 'vehicle_can', cover_label: 'VEHICLE CAN', cover_order: 30, diagram_level: 'primary', diagram_group: 'can', diagram_order: 41})
-CREATE (can_pigtail_plug:Connector {id: 'can_pigtail_plug', name: 'CAN pigtail Dupont male plug', type: '2-position Dupont male housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'male plug', mounting: 'on the transceiver CAN pigtail', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Male Dupont pins at the free end of the pigtail. The vehicle lead in use plugs on here; with no vehicle attached it is left free.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'external_harness', diagram_order: 55})
-CREATE (positap_lead_socket:Connector {id: 'positap_lead_socket', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], name: 'PosiTap lead Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the removable PosiTap lead', location: 'removable harness', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Takes the male Dupont pins of the transceiver CAN pigtail. Pin 1 is CANL; pin 2 is CANH.', enclosure_scope: 'external', external_removable: true, diagram_level: 'primary', diagram_group: 'external_harness', diagram_order: 60})
-CREATE (sn65_frame:CoordinateFrame {id: 'sn65_component_side_xz_v1', device: 'sn65', name: 'SN65 component-side board coordinate frame', units: 'mm', source: 'user-supplied STEP/STL', drawing_plane: 'STL X-Z projection', origin: 'STL minimum X and minimum Z', x_axis: 'logic header toward screw terminal', y_axis: 'lower CANH side toward upper CANL side; equals STL +Z', height_axis: 'STL +Y away from PCB base', position_accuracy_mm: 0.05})
-CREATE (positap_can_h:Connector {id: 'positap_can_h', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], name: 'PosiTap CAN-H', type: 'direct tap connector', role: 'tap onto vehicle CAN-H', signal: 'CAN-H', polarity: '+', tap_lead_color: 'white', mapping_scope: 'Vehicle-specific bus and wire color are defined on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_tap', diagram_order: 70})
-CREATE (positap_can_l:Connector {id: 'positap_can_l', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], name: 'PosiTap CAN-L', type: 'direct tap connector', role: 'tap onto vehicle CAN-L', signal: 'CAN-L', polarity: '-', tap_lead_color: 'green', mapping_scope: 'Vehicle-specific bus and wire color are defined on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_tap', diagram_order: 71})
+CREATE (sn65_logic_power_connector:Connector {id: 'sn65_logic_power_connector', variants: ['var_role_logger'], name: 'SN65HVD230 4-pin logic/power header', type: '1x4 male pin header', user_gender: 'male header', device: 'sn65', positions: 4, nominal_pitch_mm: 2.54, measured_pitch_mm: 2.52, pins_component_side_top_to_bottom: ['VCC', 'GND', 'RXD', 'TXD'], physical_edge: 'logic-header end', contact_direction: '-X in sn65_component_side_xz_v1', notes: 'Carries 3.3V, ground, TWAI RXD, and TWAI TXD between the ESP32 header and the CAN transceiver module.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
+CREATE (can_logic_power_plug:Connector {id: 'can_logic_power_plug', variants: ['var_role_logger'], name: 'SN65 4-pin logic/power plug', type: '4-position housing', user_gender: 'female housing', positions: 4, nominal_pitch_mm: 2.54, pins_top_to_bottom: ['VCC', 'GND', 'RXD', 'TXD'], notes: 'Plugs onto the SN65 1x4 logic/power header. The VCC and GND positions each hold two wires: the LG290P lead and the lead to the ESP32 3-pin power plug, which splices GPS power onto the CAN module supply.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'can', diagram_order: 38})
+CREATE (esp32_power_plug:Connector {id: 'esp32_power_plug', name: 'ESP32 3-pin power plug', type: '3-position housing', user_gender: 'female housing', positions: 3, nominal_pitch_mm: 2.54, notes: 'Plugs onto ESP32 left-header positions 1 to 3 (5V, GND, 3V3(OUT)) and carries all three power leads to the board, in both builds. The GND position holds two wires: the fan ground and, in the RTK Datalogger, the ground lead from the SN65 4-pin plug or, in the RTK Base, the LG290P ground lead. The 3V3 position holds the lead to the SN65 4-pin plug in the Datalogger and the LG290P 3.3V lead in the Base.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'power', diagram_order: 12})
+CREATE (sn65_can_screw_terminal:Connector {id: 'sn65_can_screw_terminal', variants: ['var_role_logger'], name: 'SN65HVD230 CAN screw terminal', type: '2-position PCB screw terminal', device: 'sn65', positions: 2, preferred_connection: false, position_1_signal: 'CANL', position_2_signal: 'CANH', component_side_order: 'CANL upper, CANH lower', measured_center_spacing_mm: 4.7390, notes: 'CANH and CANL screw terminals are electrically parallel with the nearby plated pads. Not used: the CAN pigtail plugs onto header pins fitted in the parallel pads.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
+CREATE (sn65_can_parallel_pads:Connector {id: 'sn65_can_parallel_pads', variants: ['var_role_logger'], name: 'SN65HVD230 parallel CAN header', type: '1x2 male pin header in the parallel CAN pads', device: 'sn65', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'male header', preferred_connection: true, position_1_signal: 'CANL', position_2_signal: 'CANH', component_side_order: 'CANL upper, CANH lower', measured_center_spacing_mm: 2.52, notes: 'Male header pins in the plated pads that are electrically parallel with the CAN screw terminals. The transceiver CAN pigtail plugs on here for every vehicle.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
+CREATE (can_pigtail_socket:Connector {id: 'can_pigtail_socket', variants: ['var_role_logger'], name: 'CAN pigtail Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the transceiver CAN pigtail', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Plugs onto the male header pins in the SN65 parallel CAN pads. Pin 1 is CANL; pin 2 is CANH.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', interface_exposure: 'external', external_interface: true, interface_type: 'vehicle_can', cover_label: 'VEHICLE CAN', cover_order: 30, diagram_level: 'primary', diagram_group: 'can', diagram_order: 41})
+CREATE (can_pigtail_plug:Connector {id: 'can_pigtail_plug', variants: ['var_role_logger'], name: 'CAN pigtail Dupont male plug', type: '2-position Dupont male housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'male plug', mounting: 'on the transceiver CAN pigtail', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Male Dupont pins at the free end of the pigtail. The vehicle lead in use plugs on here; with no vehicle attached it is left free.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'external_harness', diagram_order: 55})
+CREATE (positap_lead_socket:Connector {id: 'positap_lead_socket', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], name: 'PosiTap lead Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the removable PosiTap lead', location: 'removable harness', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Takes the male Dupont pins of the transceiver CAN pigtail. Pin 1 is CANL; pin 2 is CANH.', enclosure_scope: 'external', external_removable: true, diagram_level: 'primary', diagram_group: 'external_harness', diagram_order: 60})
+CREATE (sn65_frame:CoordinateFrame {id: 'sn65_component_side_xz_v1', variants: ['var_role_logger'], device: 'sn65', name: 'SN65 component-side board coordinate frame', units: 'mm', source: 'user-supplied STEP/STL', drawing_plane: 'STL X-Z projection', origin: 'STL minimum X and minimum Z', x_axis: 'logic header toward screw terminal', y_axis: 'lower CANH side toward upper CANL side; equals STL +Z', height_axis: 'STL +Y away from PCB base', position_accuracy_mm: 0.05})
+CREATE (positap_can_h:Connector {id: 'positap_can_h', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], name: 'PosiTap CAN-H', type: 'direct tap connector', role: 'tap onto vehicle CAN-H', signal: 'CAN-H', polarity: '+', tap_lead_color: 'white', mapping_scope: 'Vehicle-specific bus and wire color are defined on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_tap', diagram_order: 70})
+CREATE (positap_can_l:Connector {id: 'positap_can_l', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], name: 'PosiTap CAN-L', type: 'direct tap connector', role: 'tap onto vehicle CAN-L', signal: 'CAN-L', polarity: '-', tap_lead_color: 'green', mapping_scope: 'Vehicle-specific bus and wire color are defined on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_tap', diagram_order: 71})
 
 
 CREATE (esp32_header_left:Connector {id: 'esp32_header_left', name: 'ESP32 left pin header', device: 'esp32', type: '1x9 male pin header', user_gender: 'male header', positions: 9, nominal_pitch_mm: 2.54, board_side: 'left', position_order: 'header_order 1 at the top', notes: 'Left external GPIO header of the ESP32-S3-LCD-1.47B.'})
 CREATE (esp32_header_right:Connector {id: 'esp32_header_right', name: 'ESP32 right pin header', device: 'esp32', type: '1x9 male pin header', user_gender: 'male header', positions: 9, nominal_pitch_mm: 2.54, board_side: 'right', position_order: 'header_order 1 at the top', notes: 'Right external GPIO header of the ESP32-S3-LCD-1.47B.'})
 CREATE (esp32_gps_uart_plug:Connector {id: 'esp32_gps_uart_plug', name: 'ESP32 GPS UART 2-pin plug', type: '2-position housing', user_gender: 'female housing', positions: 2, nominal_pitch_mm: 2.54, notes: 'Plugs onto ESP32 left-header positions 7 and 8 (GP4, GP5), which are adjacent, and carries the GPS UART signal pair.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'harness', diagram_order: 13})
-CREATE (esp32_can_logic_plug:Connector {id: 'esp32_can_logic_plug', name: 'ESP32 CAN logic 2-pin plug', type: '2-position housing', user_gender: 'female housing', positions: 2, nominal_pitch_mm: 2.54, notes: 'Plugs onto ESP32 right-header positions 7 and 8 (GP9, GP8), which are adjacent, and carries the TWAI TX/RX leads to the SN65 4-pin plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'harness', diagram_order: 14})
+CREATE (esp32_can_logic_plug:Connector {id: 'esp32_can_logic_plug', variants: ['var_role_logger'], name: 'ESP32 CAN logic 2-pin plug', type: '2-position housing', user_gender: 'female housing', positions: 2, nominal_pitch_mm: 2.54, notes: 'Plugs onto ESP32 right-header positions 7 and 8 (GP9, GP8), which are adjacent, and carries the TWAI TX/RX leads to the SN65 4-pin plug.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'harness', diagram_order: 14})
 CREATE (lg290p_uart_cable_plug:Connector {id: 'lg290p_uart_cable_plug', name: 'LG290P UART cable plug', type: 'JST SH 1.0 mm 4-position housing', series: 'JST SH', positions: 4, nominal_pitch_mm: 1.0, user_gender: 'female housing', pin_order_status: 'not recorded; pins listed as 3.3V, GND, TX, RX without position numbers', identification: 'inferred: the Waveshare LG290P GNSS RTK Module brings its UART out on an SH1.0 4-pin connector and ships SH1.0 4-pin cables; confirm against the board in hand', notes: 'Harness end at the LG290P: a 1.0 mm pitch JST SH housing, a different series from the 2.54 mm housings at the ESP32 and SN65. Carries the GPS UART pair and the LG290P 3.3V/GND leads.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'harness', diagram_order: 31})
 CREATE (antenna_cable_plug:Connector {id: 'antenna_cable_plug', name: 'GNSS antenna cable plug', type: 'RF coaxial plug', connector_standard: 'not recorded', notes: 'Connector at the end of the antenna cable; mates with the LG290P antenna connector.', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'external_device', diagram_order: 64})
 CREATE (host_usb_port:Connector {id: 'host_usb_port', variants: ['var_usb_pc'], name: 'PC USB port', device: 'host_pc', type: 'USB host receptacle', receptacle_type: 'not recorded', notes: 'USB port on the development PC (or USB supply) that the USB-C cable plugs into.'})
@@ -436,13 +435,17 @@ CREATE (host_usb_port:Connector {id: 'host_usb_port', variants: ['var_usb_pc'], 
 // Configurations. The logger is used in one configuration at a time; each variation point names
 // the alternatives, and every element that exists only in some of them lists those in `variants`.
 // Elements with no `variants` property are present in every configuration.
+CREATE (vp_role:VariationPoint {id: 'vp_role', name: 'Unit role', default_variant: 'var_role_logger', notes: 'The unit is built as the RTK Datalogger or as the RTK Base. Only the Datalogger has the SN65 CAN transceiver and the vehicle CAN connection: the SN65 module and its 4-pin plug, the ESP32 CAN logic 2-pin plug, the transceiver CAN pigtail, the vehicle leads and taps, and the vehicle buses exist only in that role. With no SN65 4-pin plug to share, the Base powers the LG290P straight from the ESP32 3-pin power plug. Both builds carry the LG290P lithium RTC backup battery.'})
+CREATE (var_role_logger:Variant {id: 'var_role_logger', name: 'RTK Datalogger'})
+CREATE (var_role_base:Variant {id: 'var_role_base', name: 'RTK Base'})
 CREATE (vp_usb_c:VariationPoint {id: 'vp_usb_c', name: 'USB-C connection', default_variant: 'var_usb_power', notes: 'The same USB-C cable goes to the development PC while programming or debugging, and to a USB power source in use.'})
 CREATE (var_usb_power:Variant {id: 'var_usb_power', name: 'In use: USB power source'})
 CREATE (var_usb_pc:Variant {id: 'var_usb_pc', name: 'Programming and debugging: development PC'})
-CREATE (vp_vehicle_bus:VariationPoint {id: 'vp_vehicle_bus', name: 'Vehicle CAN bus', default_variant: 'var_718_chassis', notes: 'The transceiver CAN pigtail takes one vehicle lead at a time, for one car and one bus, or is left free.'})
+CREATE (vp_vehicle_bus:VariationPoint {id: 'vp_vehicle_bus', name: 'Vehicle CAN bus', default_variant: 'var_typical_obd', applies_when: ['var_role_logger'], notes: 'The transceiver CAN pigtail takes one vehicle lead at a time, for one car and one bus, or is left free. Only the RTK Datalogger has the transceiver, so this choice does not apply to the RTK Base.'})
 CREATE (var_718_chassis:Variant {id: 'var_718_chassis', name: 'Porsche 718 Chassis bus'})
 CREATE (var_718_drive:Variant {id: 'var_718_drive', name: 'Porsche 718 Drive bus'})
 CREATE (var_987_2_drive:Variant {id: 'var_987_2_drive', name: 'Porsche 987.2 Drive bus'})
+CREATE (var_typical_obd:Variant {id: 'var_typical_obd', name: 'Typical Vehicle CAN at the OBD-II port'})
 CREATE (var_frs_obd:Variant {id: 'var_frs_obd', name: 'Scion FR-S CAN at the OBD-II port'})
 CREATE (var_no_vehicle:Variant {id: 'var_no_vehicle', name: 'No vehicle attached'})
 
@@ -453,33 +456,38 @@ CREATE (usb_power_gnd:Pin {id: 'usb_power_gnd', variants: ['var_usb_power'], con
 CREATE (usb_power_dp:Pin {id: 'usb_power_dp', variants: ['var_usb_power'], connector: 'usb_power_port', name: 'D+', type: 'usb_data', notes: 'No data from a power source; how the supply terminates D+/D- is not recorded.'})
 CREATE (usb_power_dn:Pin {id: 'usb_power_dn', variants: ['var_usb_power'], connector: 'usb_power_port', name: 'D-', type: 'usb_data', notes: 'No data from a power source; how the supply terminates D+/D- is not recorded.'})
 
-CREATE (porsche_718_can_chassis:CANBus {id: 'porsche_718_can_chassis', variants: ['var_718_chassis'], name: 'Chassis CAN', vehicle_id: 'porsche_718', network_role: 'chassis CAN', tap_location: 'chassis CAN pair at the gateway; the VAG 20-pin gateway map places chassis CAN on pins 8/18, unconfirmed for the 718', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 79})
+CREATE (porsche_718_can_chassis:CANBus {id: 'porsche_718_can_chassis', variants: ['var_718_chassis', 'var_role_logger'], name: 'Chassis CAN', vehicle_id: 'porsche_718', network_role: 'chassis CAN', tap_location: 'chassis CAN pair at the gateway; the VAG 20-pin gateway map places chassis CAN on pins 8/18, unconfirmed for the 718', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 79})
 
-CREATE (scion_frs:Vehicle {id: 'scion_frs', variants: ['var_frs_obd'], manufacturer: 'Scion', model: 'FR-S', name: 'Scion FR-S', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 92})
-CREATE (scion_frs_can:CANBus {id: 'scion_frs_can', variants: ['var_frs_obd'], name: 'CAN at OBD-II port', vehicle_id: 'scion_frs', network_role: 'CAN available at the diagnostic connector', standard: 'ISO 15765-4 on SAE J1962 pins 6 (CAN-H) and 14 (CAN-L)', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 82})
-CREATE (frs_obd_port:Connector {id: 'frs_obd_port', variants: ['var_frs_obd'], name: 'FR-S OBD-II port', type: 'SAE J1962 16-position vehicle diagnostic connector', standard: 'SAE J1962', positions: 16, positions_in_use: [6, 14], user_gender: 'female', location: 'driver footwell, under the dash'})
-CREATE (frs_obd_6:Pin {id: 'frs_obd_6', variants: ['var_frs_obd'], connector: 'frs_obd_port', name: 'CAN-H', pin_number: 6, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
-CREATE (frs_obd_14:Pin {id: 'frs_obd_14', variants: ['var_frs_obd'], connector: 'frs_obd_port', name: 'CAN-L', pin_number: 14, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (scion_frs:Vehicle {id: 'scion_frs', variants: ['var_frs_obd', 'var_role_logger'], manufacturer: 'Scion', model: 'FR-S', name: 'Scion FR-S', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 92})
+CREATE (typical_vehicle:Vehicle {id: 'typical_vehicle', variants: ['var_typical_obd', 'var_role_logger'], name: 'Typical Vehicle', notes: 'Any vehicle with ISO 15765-4 CAN on the SAE J1962 diagnostic port (pins 6 and 14).', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 92})
+CREATE (scion_frs_can:CANBus {id: 'scion_frs_can', variants: ['var_frs_obd', 'var_role_logger'], name: 'CAN at OBD-II port', vehicle_id: 'scion_frs', network_role: 'CAN available at the diagnostic connector', standard: 'ISO 15765-4 on SAE J1962 pins 6 (CAN-H) and 14 (CAN-L)', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 82})
+CREATE (typical_vehicle_can:CANBus {id: 'typical_vehicle_can', variants: ['var_typical_obd', 'var_role_logger'], name: 'CAN at OBD-II port', vehicle_id: 'typical_vehicle', network_role: 'CAN available at the diagnostic connector', standard: 'ISO 15765-4 on SAE J1962 pins 6 (CAN-H) and 14 (CAN-L)', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 82})
+CREATE (frs_obd_port:Connector {id: 'frs_obd_port', variants: ['var_frs_obd', 'var_role_logger'], name: 'FR-S OBD-II port', type: 'SAE J1962 16-position vehicle diagnostic connector', standard: 'SAE J1962', positions: 16, positions_in_use: [6, 14], user_gender: 'female', location: 'driver footwell, under the dash'})
+CREATE (typical_obd_port:Connector {id: 'typical_obd_port', variants: ['var_typical_obd', 'var_role_logger'], name: 'Typical Vehicle OBD-II port', type: 'SAE J1962 16-position vehicle diagnostic connector', standard: 'SAE J1962', positions: 16, positions_in_use: [6, 14], user_gender: 'female', location: 'usually under the dash on the driver side'})
+CREATE (frs_obd_6:Pin {id: 'frs_obd_6', variants: ['var_frs_obd', 'var_role_logger'], connector: 'frs_obd_port', name: 'CAN-H', pin_number: 6, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (typical_obd_6:Pin {id: 'typical_obd_6', variants: ['var_typical_obd', 'var_role_logger'], connector: 'typical_obd_port', name: 'CAN-H', pin_number: 6, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (frs_obd_14:Pin {id: 'frs_obd_14', variants: ['var_frs_obd', 'var_role_logger'], connector: 'frs_obd_port', name: 'CAN-L', pin_number: 14, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (typical_obd_14:Pin {id: 'typical_obd_14', variants: ['var_typical_obd', 'var_role_logger'], connector: 'typical_obd_port', name: 'CAN-L', pin_number: 14, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
 
-CREATE (obd_can_lead:Harness {id: 'obd_can_lead', variants: ['var_frs_obd'], name: 'Removable OBD-II CAN lead', wires: 2, pinout: 'Dupont pin 1 CANL to OBD pin 14; Dupont pin 2 CANH to OBD pin 6', colors: 'not recorded', color_note: 'OBD-II breakout wire colours are not standardised; vendor charts differ (one gives pin 6 green, pin 14 brown/white).', enclosure_scope: 'external', notes: 'Used only on the Scion FR-S: a Dupont female housing for the transceiver CAN pigtail at one end and an OBD-II plug at the other. The Porsches use the PosiTap lead instead.'})
-CREATE (obd_lead_socket:Connector {id: 'obd_lead_socket', variants: ['var_frs_obd'], name: 'OBD-II lead Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the removable OBD-II CAN lead', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Takes the male Dupont pins of the transceiver CAN pigtail.'})
-CREATE (obd_lead_pin1:Pin {id: 'obd_lead_pin1', variants: ['var_frs_obd'], connector: 'obd_lead_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
-CREATE (obd_lead_pin2:Pin {id: 'obd_lead_pin2', variants: ['var_frs_obd'], connector: 'obd_lead_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
-CREATE (obd_lead_plug:Connector {id: 'obd_lead_plug', variants: ['var_frs_obd'], name: 'OBD-II lead plug', type: 'SAE J1962 16-position plug', standard: 'SAE J1962', positions: 16, populated_positions: [6, 14], user_gender: 'male plug', notes: 'Only positions 6 (CAN-H) and 14 (CAN-L) are populated, per SAE J1962 / ISO 15765-4.'})
-CREATE (obd_plug_6:Pin {id: 'obd_plug_6', variants: ['var_frs_obd'], connector: 'obd_lead_plug', name: 'CAN-H', pin_number: 6, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
-CREATE (obd_plug_14:Pin {id: 'obd_plug_14', variants: ['var_frs_obd'], connector: 'obd_lead_plug', name: 'CAN-L', pin_number: 14, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (obd_can_lead:Harness {id: 'obd_can_lead', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], name: 'Removable OBD-II CAN lead', wires: 2, pinout: 'Dupont pin 1 CANL to OBD pin 14; Dupont pin 2 CANH to OBD pin 6', colors: 'not recorded', color_note: 'OBD-II breakout wire colours are not standardised; vendor charts differ (one gives pin 6 green, pin 14 brown/white).', enclosure_scope: 'external', notes: 'Used at an OBD-II port (Typical Vehicle, Scion FR-S): a Dupont female housing for the transceiver CAN pigtail at one end and an OBD-II plug at the other. The Porsches use the PosiTap lead instead.'})
+CREATE (obd_lead_socket:Connector {id: 'obd_lead_socket', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], name: 'OBD-II lead Dupont female housing', type: '2-position Dupont housing', series: 'Dupont', positions: 2, nominal_pitch_mm: 2.54, user_gender: 'female housing', mounting: 'on the removable OBD-II CAN lead', pin_1_signal: 'CANL', pin_2_signal: 'CANH', housing_status: 'assumed one 2-position housing; not recorded', notes: 'Takes the male Dupont pins of the transceiver CAN pigtail.'})
+CREATE (obd_lead_pin1:Pin {id: 'obd_lead_pin1', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], connector: 'obd_lead_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (obd_lead_pin2:Pin {id: 'obd_lead_pin2', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], connector: 'obd_lead_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (obd_lead_plug:Connector {id: 'obd_lead_plug', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], name: 'OBD-II lead plug', type: 'SAE J1962 16-position plug', standard: 'SAE J1962', positions: 16, populated_positions: [6, 14], user_gender: 'male plug', notes: 'Only positions 6 (CAN-H) and 14 (CAN-L) are populated, per SAE J1962 / ISO 15765-4.'})
+CREATE (obd_plug_6:Pin {id: 'obd_plug_6', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], connector: 'obd_lead_plug', name: 'CAN-H', pin_number: 6, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (obd_plug_14:Pin {id: 'obd_plug_14', variants: ['var_typical_obd', 'var_frs_obd', 'var_role_logger'], connector: 'obd_lead_plug', name: 'CAN-L', pin_number: 14, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
 
 // Enclosure-boundary and external-interface model.
-CREATE (rcx_enclosure:Enclosure {id: 'rcx_enclosure', name: 'RCX RTK Datalogger enclosure', type: '3D-printed electronics enclosure', diagram_level: 'primary', diagram_group: 'enclosure', diagram_order: 0, notes: 'Internal electronics are contained here. Externally accessible interfaces are USB-C (5V power and native USB data), the GNSS antenna connection, and the transceiver CAN pigtail, which leaves the enclosure from the SN65 parallel CAN header.'})
+CREATE (rcx_enclosure:Enclosure {id: 'rcx_enclosure', name: 'RCX enclosure', type: '3D-printed electronics enclosure', diagram_level: 'primary', diagram_group: 'enclosure', diagram_order: 0, notes: 'Internal electronics are contained here. The SN65 CAN transceiver is fitted in the RTK Datalogger only. Externally accessible interfaces are USB-C (5V power and native USB data), the GNSS antenna connection, and, in the RTK Datalogger role only, the transceiver CAN pigtail, which leaves the enclosure from the SN65 parallel CAN header.'})
 CREATE (lg290p_antenna_connector:Connector {id: 'lg290p_antenna_connector', name: 'LG290P antenna connector', device: 'lg290p', type: 'RF antenna connector', connector_standard: 'TBD from exact LG290P carrier/module', role: 'GNSS RF input', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', interface_exposure: 'external', external_interface: true, interface_type: 'gnss_antenna', cover_label: 'GNSS ANTENNA', cover_order: 20, diagram_level: 'primary', diagram_group: 'external_interface', diagram_order: 35, physical_position_status: 'connector location and standard not yet dimensioned', notes: 'Externally accessible antenna connection on the LG290P module.'})
 CREATE (external_gnss_antenna:Antenna {id: 'external_gnss_antenna', name: 'External multiband GNSS antenna', type: 'active GNSS antenna', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'external_device', diagram_order: 65, mounting: 'vehicle exterior or other sky-view location', notes: 'The antenna cable is permanently attached at the antenna and ends in the antenna cable plug, which mates with the LG290P antenna connector.'})
 CREATE (host_pc:Host {id: 'host_pc', variants: ['var_usb_pc'], name: 'Development PC running Arduino IDE', type: 'USB host', role: 'firmware upload and serial monitor over the ESP32-S3 USB Serial/JTAG port', connection: 'USB-C cable to the ESP32 onboard USB-C connector', attached: 'during development; in the vehicle the same port takes 5V from a USB supply', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'external_device', diagram_order: 5})
 // Vehicle-specific CAN mappings. Vehicle wire colors belong to the tap-to-bus
 // relationship, not globally to either the PosiTap or CAN bus node.
-CREATE (porsche_718:Vehicle {id: 'porsche_718', variants: ['var_718_drive', 'var_718_chassis'], manufacturer: 'Porsche', model: '718', generation: '982', name: 'Porsche 718', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 90})
-CREATE (porsche_987_2:Vehicle {id: 'porsche_987_2', variants: ['var_987_2_drive'], manufacturer: 'Porsche', model: '987.2', generation: '987.2', name: 'Porsche 987.2', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 91})
-CREATE (porsche_718_can_drive_high:CANBus {id: 'porsche_718_can_drive_high', variants: ['var_718_drive'], name: 'Drive CAN', vehicle_id: 'porsche_718', network_role: 'drive/powertrain CAN', bitrate_kbps: 500, tap_location: 'drive CAN pair at the gateway harness (pin 16 = CAN-H per community reports)', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 80})
-CREATE (porsche_987_2_can_drive:CANBus {id: 'porsche_987_2_can_drive', variants: ['var_987_2_drive'], name: 'CAN Drive', vehicle_id: 'porsche_987_2', network_role: 'drive/powertrain CAN', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 81})
+CREATE (porsche_718:Vehicle {id: 'porsche_718', variants: ['var_718_drive', 'var_718_chassis', 'var_role_logger'], manufacturer: 'Porsche', model: '718', generation: '982', name: 'Porsche 718', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 90})
+CREATE (porsche_987_2:Vehicle {id: 'porsche_987_2', variants: ['var_987_2_drive', 'var_role_logger'], manufacturer: 'Porsche', model: '987.2', generation: '987.2', name: 'Porsche 987.2', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle', diagram_order: 91})
+CREATE (porsche_718_can_drive_high:CANBus {id: 'porsche_718_can_drive_high', variants: ['var_718_drive', 'var_role_logger'], name: 'Drive CAN', vehicle_id: 'porsche_718', network_role: 'drive/powertrain CAN', bitrate_kbps: 500, tap_location: 'drive CAN pair at the gateway harness (pin 16 = CAN-H per community reports)', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 80})
+CREATE (porsche_987_2_can_drive:CANBus {id: 'porsche_987_2_can_drive', variants: ['var_987_2_drive', 'var_role_logger'], name: 'CAN Drive', vehicle_id: 'porsche_987_2', network_role: 'drive/powertrain CAN', enclosure_scope: 'external', diagram_level: 'primary', diagram_group: 'vehicle_bus', diagram_order: 81})
 CREATE (esp_5v:Pin {id: 'esp_5v', device: 'esp32', connector: 'esp32_header_left', name: '5V', type: 'power', direction: 'IN/OUT', voltage: '5V', header_side: 'left', header_order: 1, functions: ['5V rail']})
 CREATE (esp_gnd_l:Pin {id: 'esp_gnd_l', device: 'esp32', connector: 'esp32_header_left', name: 'GND', type: 'ground', header_side: 'left', header_order: 2, functions: ['Ground']})
 CREATE (esp_3v3:Pin {id: 'esp_3v3', device: 'esp32', connector: 'esp32_header_left', name: '3V3(OUT)', type: 'power_out', direction: 'OUT', voltage: '3.3V', header_side: 'left', header_order: 3, functions: ['3.3V regulated output']})
@@ -495,8 +503,8 @@ CREATE (esp_vbat:Pin {id: 'esp_vbat', device: 'esp32', connector: 'esp32_header_
 CREATE (esp_gnd_r:Pin {id: 'esp_gnd_r', device: 'esp32', connector: 'esp32_header_right', name: 'GND', type: 'ground', header_side: 'right', header_order: 4, functions: ['Ground']})
 CREATE (esp_gp11:Pin {id: 'esp_gp11', device: 'esp32', connector: 'esp32_header_right', name: 'GP11', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 5, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO']})
 CREATE (esp_gp10:Pin {id: 'esp_gp10', device: 'esp32', connector: 'esp32_header_right', name: 'GP10', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 6, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO']})
-CREATE (esp_gp9:Pin {id: 'esp_gp9', device: 'esp32', connector: 'esp32_header_right', name: 'GP9', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 7, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO', 'TWAI_TX'], assigned_function: 'TWAI_TX', direction: 'OUT', notes: 'Correct mapping: TWAI TX is GPIO9. Wired to SN65 TXD; typically listen-only.'})
-CREATE (esp_gp8:Pin {id: 'esp_gp8', device: 'esp32', connector: 'esp32_header_right', name: 'GP8', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 8, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO', 'TWAI_RX'], assigned_function: 'TWAI_RX', direction: 'IN', notes: 'Correct mapping: TWAI RX is GPIO8. Receives SN65 RXD.'})
+CREATE (esp_gp9:Pin {id: 'esp_gp9', device: 'esp32', connector: 'esp32_header_right', name: 'GP9', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 7, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO', 'TWAI_TX'], assigned_function: 'TWAI_TX', direction: 'OUT', notes: 'Correct mapping: TWAI TX is GPIO9. Wired to SN65 TXD in the RTK Datalogger (typically listen-only); unconnected in the RTK Base.'})
+CREATE (esp_gp8:Pin {id: 'esp_gp8', device: 'esp32', connector: 'esp32_header_right', name: 'GP8', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 8, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO', 'TWAI_RX'], assigned_function: 'TWAI_RX', direction: 'IN', notes: 'Correct mapping: TWAI RX is GPIO8. Receives SN65 RXD in the RTK Datalogger; unconnected in the RTK Base.'})
 CREATE (esp_gp7:Pin {id: 'esp_gp7', device: 'esp32', connector: 'esp32_header_right', name: 'GP7', type: 'gpio', logic: '3.3V', header_side: 'right', header_order: 9, functions: ['SPI', 'I2C', 'ADC', 'I2S', 'PWM', 'UART', 'GPIO']})
 CREATE (esp_io12:Pin {id: 'esp_io12', device: 'esp32', name: 'IO12', type: 'internal_gpio', functions: ['IMU_INT2', 'GPIO']})
 CREATE (esp_io13:Pin {id: 'esp_io13', device: 'esp32', name: 'IO13', type: 'internal_gpio', functions: ['IMU_INT1']})
@@ -523,29 +531,29 @@ CREATE (gps_vcc:Pin {id: 'gps_vcc', device: 'lg290p', connector: 'lg290p_uart_co
 CREATE (gps_gnd:Pin {id: 'gps_gnd', device: 'lg290p', connector: 'lg290p_uart_connector', name: 'GND', type: 'ground'})
 CREATE (gps_tx:Pin {id: 'gps_tx', device: 'lg290p', connector: 'lg290p_uart_connector', name: 'TX', type: 'signal', direction: 'OUT', logic: '3.3V', notes: 'GNSS TX to ESP32 UART1_RX / GP4'})
 CREATE (gps_rx:Pin {id: 'gps_rx', device: 'lg290p', connector: 'lg290p_uart_connector', name: 'RX', type: 'signal', direction: 'IN', logic: '3.3V', notes: 'GNSS RX from ESP32 UART1_TX / GP5'})
-CREATE (can_vcc:Pin {id: 'can_vcc', device: 'sn65', connector: 'sn65_logic_power_connector', name: 'VCC', pin_number: 1, type: 'power_in', voltage: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 9.0156, physical_edge: 'logic-header end', notes: 'Top pin in component-side reference view.'})
-CREATE (can_gnd:Pin {id: 'can_gnd', device: 'sn65', connector: 'sn65_logic_power_connector', name: 'GND', pin_number: 2, type: 'ground', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 6.4956, physical_edge: 'logic-header end'})
-CREATE (can_rxd:Pin {id: 'can_rxd', device: 'sn65', connector: 'sn65_logic_power_connector', name: 'RXD', pin_number: 3, type: 'signal', direction: 'OUT', logic: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 3.9756, physical_edge: 'logic-header end', notes: 'CAN logic receive data to ESP32 GPIO8/TWAI_RX'})
-CREATE (can_txd:Pin {id: 'can_txd', device: 'sn65', connector: 'sn65_logic_power_connector', name: 'TXD', pin_number: 4, type: 'signal', direction: 'IN', logic: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 1.4556, physical_edge: 'logic-header end', notes: 'CAN logic transmit data from ESP32 GPIO9/TWAI_TX; may remain undriven in listen-only mode'})
-CREATE (can_h:Pin {id: 'can_h', device: 'sn65', name: 'CANH logical signal', type: 'can_diff', direction: 'BIDIR', logical_signal: true, physical_contacts: 2, notes: 'CAN differential high is exposed at the screw terminal and a parallel header pin.'})
-CREATE (can_l:Pin {id: 'can_l', device: 'sn65', name: 'CANL logical signal', type: 'can_diff', direction: 'BIDIR', logical_signal: true, physical_contacts: 2, notes: 'CAN differential low is exposed at the screw terminal and a parallel header pin.'})
-CREATE (can_l_screw:Pin {id: 'can_l_screw', device: 'sn65', connector: 'sn65_can_screw_terminal', name: 'CANL screw terminal', display_position: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', preferred_connection: false, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 28.4820, position_y_mm: 7.9591, notes: 'Upper screw terminal in component-side reference view.'})
-CREATE (can_h_screw:Pin {id: 'can_h_screw', device: 'sn65', connector: 'sn65_can_screw_terminal', name: 'CANH screw terminal', display_position: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', preferred_connection: false, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 28.4820, position_y_mm: 3.2200, notes: 'Lower screw terminal in component-side reference view.'})
-CREATE (can_l_pad:Pin {id: 'can_l_pad', device: 'sn65', connector: 'sn65_can_parallel_pads', name: 'CANL parallel header pin', display_position: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', preferred_connection: true, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 22.5881, position_y_mm: 6.5008, notes: 'Electrically parallel with CANL screw terminal.'})
-CREATE (can_h_pad:Pin {id: 'can_h_pad', device: 'sn65', connector: 'sn65_can_parallel_pads', name: 'CANH parallel header pin', display_position: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', preferred_connection: true, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 22.5881, position_y_mm: 3.9808, notes: 'Electrically parallel with CANH screw terminal.'})
-CREATE (can_pigtail_socket_pin1:Pin {id: 'can_pigtail_socket_pin1', connector: 'can_pigtail_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
-CREATE (can_pigtail_plug_pin1:Pin {id: 'can_pigtail_plug_pin1', connector: 'can_pigtail_plug', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
-CREATE (can_pigtail_socket_pin2:Pin {id: 'can_pigtail_socket_pin2', connector: 'can_pigtail_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
-CREATE (can_pigtail_plug_pin2:Pin {id: 'can_pigtail_plug_pin2', connector: 'can_pigtail_plug', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
-CREATE (positap_lead_pin1:Pin {id: 'positap_lead_pin1', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], connector: 'positap_lead_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', wire_color: 'green'})
-CREATE (positap_lead_pin2:Pin {id: 'positap_lead_pin2', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], connector: 'positap_lead_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', wire_color: 'white'})
+CREATE (can_vcc:Pin {id: 'can_vcc', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_logic_power_connector', name: 'VCC', pin_number: 1, type: 'power_in', voltage: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 9.0156, physical_edge: 'logic-header end', notes: 'Top pin in component-side reference view.'})
+CREATE (can_gnd:Pin {id: 'can_gnd', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_logic_power_connector', name: 'GND', pin_number: 2, type: 'ground', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 6.4956, physical_edge: 'logic-header end'})
+CREATE (can_rxd:Pin {id: 'can_rxd', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_logic_power_connector', name: 'RXD', pin_number: 3, type: 'signal', direction: 'OUT', logic: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 3.9756, physical_edge: 'logic-header end', notes: 'CAN logic receive data to ESP32 GPIO8/TWAI_RX'})
+CREATE (can_txd:Pin {id: 'can_txd', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_logic_power_connector', name: 'TXD', pin_number: 4, type: 'signal', direction: 'IN', logic: '3.3V', position_frame: 'sn65_component_side_xz_v1', position_x_mm: 6.4852, position_y_mm: 1.4556, physical_edge: 'logic-header end', notes: 'CAN logic transmit data from ESP32 GPIO9/TWAI_TX; may remain undriven in listen-only mode'})
+CREATE (can_h:Pin {id: 'can_h', variants: ['var_role_logger'], device: 'sn65', name: 'CANH logical signal', type: 'can_diff', direction: 'BIDIR', logical_signal: true, physical_contacts: 2, notes: 'CAN differential high is exposed at the screw terminal and a parallel header pin.'})
+CREATE (can_l:Pin {id: 'can_l', variants: ['var_role_logger'], device: 'sn65', name: 'CANL logical signal', type: 'can_diff', direction: 'BIDIR', logical_signal: true, physical_contacts: 2, notes: 'CAN differential low is exposed at the screw terminal and a parallel header pin.'})
+CREATE (can_l_screw:Pin {id: 'can_l_screw', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_can_screw_terminal', name: 'CANL screw terminal', display_position: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', preferred_connection: false, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 28.4820, position_y_mm: 7.9591, notes: 'Upper screw terminal in component-side reference view.'})
+CREATE (can_h_screw:Pin {id: 'can_h_screw', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_can_screw_terminal', name: 'CANH screw terminal', display_position: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', preferred_connection: false, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 28.4820, position_y_mm: 3.2200, notes: 'Lower screw terminal in component-side reference view.'})
+CREATE (can_l_pad:Pin {id: 'can_l_pad', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_can_parallel_pads', name: 'CANL parallel header pin', display_position: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', preferred_connection: true, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 22.5881, position_y_mm: 6.5008, notes: 'Electrically parallel with CANL screw terminal.'})
+CREATE (can_h_pad:Pin {id: 'can_h_pad', variants: ['var_role_logger'], device: 'sn65', connector: 'sn65_can_parallel_pads', name: 'CANH parallel header pin', display_position: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', preferred_connection: true, position_frame: 'sn65_component_side_xz_v1', position_x_mm: 22.5881, position_y_mm: 3.9808, notes: 'Electrically parallel with CANH screw terminal.'})
+CREATE (can_pigtail_socket_pin1:Pin {id: 'can_pigtail_socket_pin1', variants: ['var_role_logger'], connector: 'can_pigtail_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (can_pigtail_plug_pin1:Pin {id: 'can_pigtail_plug_pin1', variants: ['var_role_logger'], connector: 'can_pigtail_plug', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact'})
+CREATE (can_pigtail_socket_pin2:Pin {id: 'can_pigtail_socket_pin2', variants: ['var_role_logger'], connector: 'can_pigtail_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (can_pigtail_plug_pin2:Pin {id: 'can_pigtail_plug_pin2', variants: ['var_role_logger'], connector: 'can_pigtail_plug', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact'})
+CREATE (positap_lead_pin1:Pin {id: 'positap_lead_pin1', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], connector: 'positap_lead_socket', name: 'Pin 1 CANL', pin_number: 1, signal: 'CAN-L', polarity: '-', type: 'can_diff_contact', wire_color: 'green'})
+CREATE (positap_lead_pin2:Pin {id: 'positap_lead_pin2', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], connector: 'positap_lead_socket', name: 'Pin 2 CANH', pin_number: 2, signal: 'CAN-H', polarity: '+', type: 'can_diff_contact', wire_color: 'white'})
 CREATE (usb_c_cable:Harness {id: 'usb_c_cable', name: 'USB-C cable', type: 'jacketed cable', jacketed: true, wires: 4, conductors: ['VBUS', 'GND', 'D+', 'D-'], notes: 'One jacketed cable from the development PC (or a USB supply) to the ESP32 onboard USB-C receptacle. Its four conductors run together in the same jacket and carry 5V power and native USB data.'})
 CREATE (gps_uart:Harness {id: 'gps_uart', name: 'GPS UART signal pair', wires: 2, colors: 'orange, yellow', notes: 'UART signal wires from the LG290P UART cable plug (JST SH) to the ESP32 GPS UART 2-pin plug on header positions 7 and 8.'})
-CREATE (can_logic_power:Harness {id: 'can_logic_power', name: 'CAN logic/power 4-pin harness', wires: 4, colors: 'red, black, green, blue', notes: 'Four leads from the SN65 4-pin plug: VCC and GND to the 3V3 and GND positions of the ESP32 3-pin power plug, RXD and TXD to GP8 and GP9 through the ESP32 CAN logic 2-pin plug.'})
-CREATE (gps_power:Harness {id: 'gps_power', name: 'GPS power pair', wires: 2, colors: 'red, black', notes: 'LG290P 3.3V and GND leads from the LG290P UART cable plug, doubled into the VCC and GND positions of the SN65 4-pin plug.'})
+CREATE (can_logic_power:Harness {id: 'can_logic_power', variants: ['var_role_logger'], name: 'CAN logic/power 4-pin harness', wires: 4, colors: 'red, black, green, blue', notes: 'Four leads from the SN65 4-pin plug: VCC and GND to the 3V3 and GND positions of the ESP32 3-pin power plug, RXD and TXD to GP8 and GP9 through the ESP32 CAN logic 2-pin plug.'})
+CREATE (gps_power:Harness {id: 'gps_power', variants: ['var_role_logger'], name: 'GPS power pair', wires: 2, colors: 'red, black', notes: 'LG290P 3.3V and GND leads from the LG290P UART cable plug, doubled into the VCC and GND positions of the SN65 4-pin plug.'})
 CREATE (fan_leads:Harness {id: 'fan_leads', name: 'Fan leads', wires: 2, colors: 'red, black', notes: 'Fan +5V and GND into the 5V and GND positions of the ESP32 3-pin power plug.'})
-CREATE (can_pigtail:Harness {id: 'can_pigtail', name: 'Transceiver CAN pigtail', wires: 2, colors: 'not recorded', pinout: 'pin 1 CANL; pin 2 CANH at both ends', notes: 'Female Dupont housing on the SN65 parallel CAN header at one end, male Dupont pins at the other. Every vehicle lead plugs onto its male end.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal to external', diagram_level: 'detail'})
-CREATE (vehicle_can_taps:Harness {id: 'vehicle_can_taps', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive'], name: 'Removable CAN tap lead', wires: 2, colors: 'white, green', pinout: 'pin 1 CANL green; pin 2 CANH white', notes: 'Runs from its Dupont female housing, plugged onto the transceiver CAN pigtail, to the PosiTap connectors. Vehicle-side conductor colors are defined per vehicle on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'detail'})
+CREATE (can_pigtail:Harness {id: 'can_pigtail', variants: ['var_role_logger'], name: 'Transceiver CAN pigtail', wires: 2, colors: 'green, white', color_source: 'Stated by the vehicle owner: same colours as the removable CAN tap lead', pinout: 'pin 1 CANL green; pin 2 CANH white at both ends', notes: 'Female Dupont housing on the SN65 parallel CAN header at one end, male Dupont pins at the other. Every vehicle lead plugs onto its male end.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal to external', diagram_level: 'detail'})
+CREATE (vehicle_can_taps:Harness {id: 'vehicle_can_taps', variants: ['var_718_drive', 'var_718_chassis', 'var_987_2_drive', 'var_role_logger'], name: 'Removable CAN tap lead', wires: 2, colors: 'white, green', pinout: 'pin 1 CANL green; pin 2 CANH white', notes: 'Runs from its Dupont female housing, plugged onto the transceiver CAN pigtail, to the PosiTap connectors. Vehicle-side conductor colors are defined per vehicle on TAPS_VEHICLE_CAN relationships.', enclosure_scope: 'external', diagram_level: 'detail'})
 CREATE (function_UART:Function {name: 'UART', id: 'function:UART'})
 CREATE (function_PWM:Function {name: 'PWM', id: 'function:PWM'})
 CREATE (function_I2S:Function {name: 'I2S', id: 'function:I2S'})
@@ -589,12 +597,12 @@ CREATE (esp32_usb_vbus:Pin {id: 'esp32_usb_vbus', device: 'esp32', connector: 'e
 CREATE (esp32_usb_gnd:Pin {id: 'esp32_usb_gnd', device: 'esp32', connector: 'esp32_usb_c', name: 'USB-C GND', type: 'ground', notes: 'Ground pin internal to the ESP32 onboard USB-C receptacle; common with board ground.'})
 CREATE (esp32_usb_dn:Pin {id: 'esp32_usb_dn', device: 'esp32', connector: 'esp32_usb_c', name: 'USB D-', type: 'usb_data', direction: 'BIDIR', notes: 'D- contacts of the ESP32 onboard USB-C receptacle; routed on-board to GPIO19.'})
 CREATE (esp32_usb_dp:Pin {id: 'esp32_usb_dp', device: 'esp32', connector: 'esp32_usb_c', name: 'USB D+', type: 'usb_data', direction: 'BIDIR', notes: 'D+ contacts of the ESP32 onboard USB-C receptacle; routed on-board to GPIO20.'})
-CREATE (fan_vplus:Pin {id: 'fan_vplus', device: 'fan', name: '+5V', type: 'power_in', direction: 'IN', voltage: '5V', lead_color: 'red', termination: 'flying lead; no connector at the fan'})
-CREATE (fan_gnd:Pin {id: 'fan_gnd', device: 'fan', name: 'GND', type: 'ground', lead_color: 'black', termination: 'flying lead; no connector at the fan'})
+CREATE (fan_vplus:Pin {id: 'fan_vplus', device: 'fan', name: '+5V', type: 'power_in', direction: 'IN', voltage: '5V', lead_color: 'red', termination: 'hardwired inside the fan; no connector at the fan end'})
+CREATE (fan_gnd:Pin {id: 'fan_gnd', device: 'fan', name: 'GND', type: 'ground', lead_color: 'black', termination: 'hardwired inside the fan; no connector at the fan end'})
 CREATE (esp_uplug_rx:Pin {id: 'esp_uplug_rx', connector: 'esp32_gps_uart_plug', name: 'UART1 RX', pin_number: 1, type: 'signal', logic: '3.3V'})
 CREATE (esp_uplug_tx:Pin {id: 'esp_uplug_tx', connector: 'esp32_gps_uart_plug', name: 'UART1 TX', pin_number: 2, type: 'signal', logic: '3.3V'})
-CREATE (esp_cplug_tx:Pin {id: 'esp_cplug_tx', connector: 'esp32_can_logic_plug', name: 'TWAI TX', pin_number: 1, type: 'signal', logic: '3.3V'})
-CREATE (esp_cplug_rx:Pin {id: 'esp_cplug_rx', connector: 'esp32_can_logic_plug', name: 'TWAI RX', pin_number: 2, type: 'signal', logic: '3.3V'})
+CREATE (esp_cplug_tx:Pin {id: 'esp_cplug_tx', variants: ['var_role_logger'], connector: 'esp32_can_logic_plug', name: 'TWAI TX', pin_number: 1, type: 'signal', logic: '3.3V'})
+CREATE (esp_cplug_rx:Pin {id: 'esp_cplug_rx', variants: ['var_role_logger'], connector: 'esp32_can_logic_plug', name: 'TWAI RX', pin_number: 2, type: 'signal', logic: '3.3V'})
 CREATE (gps_plug_vcc:Pin {id: 'gps_plug_vcc', connector: 'lg290p_uart_cable_plug', name: '3.3V', type: 'power', voltage: '3.3V'})
 CREATE (gps_plug_gnd:Pin {id: 'gps_plug_gnd', connector: 'lg290p_uart_cable_plug', name: 'GND', type: 'ground'})
 CREATE (gps_plug_tx:Pin {id: 'gps_plug_tx', connector: 'lg290p_uart_cable_plug', name: 'TX', type: 'signal', logic: '3.3V'})
@@ -606,12 +614,12 @@ CREATE (host_usb_vbus:Pin {id: 'host_usb_vbus', variants: ['var_usb_pc'], connec
 CREATE (host_usb_gnd:Pin {id: 'host_usb_gnd', variants: ['var_usb_pc'], connector: 'host_usb_port', name: 'GND', type: 'ground'})
 CREATE (host_usb_dp:Pin {id: 'host_usb_dp', variants: ['var_usb_pc'], connector: 'host_usb_port', name: 'D+', type: 'usb_data', direction: 'BIDIR'})
 CREATE (host_usb_dn:Pin {id: 'host_usb_dn', variants: ['var_usb_pc'], connector: 'host_usb_port', name: 'D-', type: 'usb_data', direction: 'BIDIR'})
-CREATE (can_plug_vcc:Pin {id: 'can_plug_vcc', connector: 'can_logic_power_plug', name: 'VCC', pin_number: 1, type: 'power', voltage: '3.3V', termination: 'two wires: LG290P 3.3V lead and ESP32 3.3V lead'})
-CREATE (can_plug_gnd:Pin {id: 'can_plug_gnd', connector: 'can_logic_power_plug', name: 'GND', pin_number: 2, type: 'ground', termination: 'two wires: LG290P GND lead and ESP32 GND lead'})
-CREATE (can_plug_rxd:Pin {id: 'can_plug_rxd', connector: 'can_logic_power_plug', name: 'RXD', pin_number: 3, type: 'signal', logic: '3.3V'})
-CREATE (can_plug_txd:Pin {id: 'can_plug_txd', connector: 'can_logic_power_plug', name: 'TXD', pin_number: 4, type: 'signal', logic: '3.3V'})
+CREATE (can_plug_vcc:Pin {id: 'can_plug_vcc', variants: ['var_role_logger'], connector: 'can_logic_power_plug', name: 'VCC', pin_number: 1, type: 'power', voltage: '3.3V', termination: 'two wires: LG290P 3.3V lead and ESP32 3.3V lead'})
+CREATE (can_plug_gnd:Pin {id: 'can_plug_gnd', variants: ['var_role_logger'], connector: 'can_logic_power_plug', name: 'GND', pin_number: 2, type: 'ground', termination: 'two wires: LG290P GND lead and ESP32 GND lead'})
+CREATE (can_plug_rxd:Pin {id: 'can_plug_rxd', variants: ['var_role_logger'], connector: 'can_logic_power_plug', name: 'RXD', pin_number: 3, type: 'signal', logic: '3.3V'})
+CREATE (can_plug_txd:Pin {id: 'can_plug_txd', variants: ['var_role_logger'], connector: 'can_logic_power_plug', name: 'TXD', pin_number: 4, type: 'signal', logic: '3.3V'})
 CREATE (esp_plug_5v:Pin {id: 'esp_plug_5v', connector: 'esp32_power_plug', name: '5V', pin_number: 1, type: 'power', voltage: '5V'})
-CREATE (esp_plug_gnd:Pin {id: 'esp_plug_gnd', connector: 'esp32_power_plug', name: 'GND', pin_number: 2, type: 'ground', termination: 'two wires: SN65 plug ground lead and fan ground'})
+CREATE (esp_plug_gnd:Pin {id: 'esp_plug_gnd', connector: 'esp32_power_plug', name: 'GND', pin_number: 2, type: 'ground', termination: 'two wires: fan ground, plus the SN65 plug ground lead (RTK Datalogger) or the LG290P ground lead (RTK Base)'})
 CREATE (esp_plug_3v3:Pin {id: 'esp_plug_3v3', connector: 'esp32_power_plug', name: '3V3', pin_number: 3, type: 'power', voltage: '3.3V'})
 
 MATCH (a {id: 'esp32'}), (b {id: 'esp32_usb_c'}) CREATE (a)-[:HAS_CONNECTOR {}]->(b)
@@ -705,9 +713,9 @@ MATCH (a {id: 'can_plug_rxd'}), (b {id: 'esp_cplug_rx'}) CREATE (a)-[:WIRE {id: 
 MATCH (a {id: 'esp_cplug_tx'}), (b {id: 'can_plug_txd'}) CREATE (a)-[:WIRE {id: 'w_esp_gp9_to_can_txd', color: 'blue', signal: 'ESP32_TWAI_TX_TO_SN65_TXD', gauge: '26 AWG', harness: 'can_logic_power', physical: 'ESP32 CAN logic plug position 1 (GP9) to SN65 4-pin plug TXD', notes: 'Correct mapping: GPIO9 = TWAI_TX; may be configured listen-only and never driven'}]->(b)
 MATCH (a {id: 'can_pigtail_socket'}), (b {id: 'sn65_can_parallel_pads'}) CREATE (a)-[:MATES_WITH {series: 'Dupont', positions: 2, detachable: true}]->(b)
 MATCH (a {id: 'can_pigtail_socket_pin1'}), (b {id: 'can_l_pad'}) CREATE (a)-[:MATES_WITH {position: 1, signal: 'CAN-L'}]->(b)
-MATCH (a {id: 'can_pigtail_socket_pin1'}), (b {id: 'can_pigtail_plug_pin1'}) CREATE (a)-[:WIRE {id: 'w_can_pigtail_canl', signal: 'CAN-L', polarity: '-', harness: 'can_pigtail', notes: 'Transceiver CAN pigtail: female housing pin 1 to male pin 1. Colour not recorded.'}]->(b)
+MATCH (a {id: 'can_pigtail_socket_pin1'}), (b {id: 'can_pigtail_plug_pin1'}) CREATE (a)-[:WIRE {id: 'w_can_pigtail_canl', color: 'green', color_code: 'GRN', signal: 'CAN-L', polarity: '-', harness: 'can_pigtail', notes: 'Transceiver CAN pigtail: female housing pin 1 to male pin 1. Green, the same as the removable tap lead (stated by the vehicle owner).'}]->(b)
 MATCH (a {id: 'can_pigtail_socket_pin2'}), (b {id: 'can_h_pad'}) CREATE (a)-[:MATES_WITH {position: 2, signal: 'CAN-H'}]->(b)
-MATCH (a {id: 'can_pigtail_socket_pin2'}), (b {id: 'can_pigtail_plug_pin2'}) CREATE (a)-[:WIRE {id: 'w_can_pigtail_canh', signal: 'CAN-H', polarity: '+', harness: 'can_pigtail', notes: 'Transceiver CAN pigtail: female housing pin 2 to male pin 2. Colour not recorded.'}]->(b)
+MATCH (a {id: 'can_pigtail_socket_pin2'}), (b {id: 'can_pigtail_plug_pin2'}) CREATE (a)-[:WIRE {id: 'w_can_pigtail_canh', color: 'white', color_code: 'WHT', signal: 'CAN-H', polarity: '+', harness: 'can_pigtail', notes: 'Transceiver CAN pigtail: female housing pin 2 to male pin 2. White, the same as the removable tap lead (stated by the vehicle owner).'}]->(b)
 MATCH (a {id: 'positap_lead_socket'}), (b {id: 'can_pigtail_plug'}) CREATE (a)-[:MATES_WITH {series: 'Dupont', positions: 2, detachable: true}]->(b)
 MATCH (a {id: 'positap_lead_pin1'}), (b {id: 'can_pigtail_plug_pin1'}) CREATE (a)-[:MATES_WITH {position: 1, signal: 'CAN-L'}]->(b)
 MATCH (a {id: 'positap_lead_pin2'}), (b {id: 'can_pigtail_plug_pin2'}) CREATE (a)-[:MATES_WITH {position: 2, signal: 'CAN-H'}]->(b)
@@ -952,9 +960,50 @@ MATCH (a {id: 'rcx_enclosure'}), (b {id: 'esp32_gps_uart_plug'}) CREATE (a)-[:CO
 MATCH (a {id: 'rcx_enclosure'}), (b {id: 'esp32_can_logic_plug'}) CREATE (a)-[:CONTAINS {}]->(b)
 MATCH (a {id: 'rcx_enclosure'}), (b {id: 'lg290p_uart_cable_plug'}) CREATE (a)-[:CONTAINS {}]->(b)
 
+// RTK Base power: with no SN65 4-pin plug, the LG290P 3.3V and GND leads run straight to the ESP32 3-pin power plug.
+CREATE (gps_power_base:Harness {id: 'gps_power_base', variants: ['var_role_base'], name: 'GPS power pair (RTK Base)', wires: 2, colors: 'red, black', color_status: 'proposed: same colours as the Datalogger GPS power pair', design_status: 'proposed RTK Base wiring', notes: 'LG290P 3.3V and GND leads from the LG290P UART cable plug to the 3V3 and GND positions of the ESP32 3-pin power plug. The 3V3 position takes this lead alone; the GND position holds it doubled with the fan ground, as the Datalogger GND position holds the SN65 ground lead.'})
+
+// LG290P RTC backup battery, fitted in both builds.
+CREATE (lg290p_battery_connector:Connector {id: 'lg290p_battery_connector', name: 'LG290P RTC battery connector', device: 'lg290p', type: '2-pin JST connector for an RTC backup battery', series: 'JST; pitch not recorded', positions: 2, user_gender: 'male header', identification: 'Waveshare LG290P GNSS RTK Module wiki: onboard 2PIN JST connector for connecting an RTC backup battery', pin_order_status: 'not recorded', notes: 'Onboard connector on the LG290P module. A backup battery keeps the receiver real-time clock and almanac data alive while main power is off, which shortens time to first fix.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'detail'})
+CREATE (gps_bat_pos:Pin {id: 'gps_bat_pos', device: 'lg290p', connector: 'lg290p_battery_connector', name: 'BAT+', type: 'power_in', notes: 'Backup battery positive into the LG290P.'})
+CREATE (gps_bat_gnd:Pin {id: 'gps_bat_gnd', device: 'lg290p', connector: 'lg290p_battery_connector', name: 'GND', type: 'ground', notes: 'Backup battery negative; board ground on the LG290P module.'})
+CREATE (lg290p_backup_battery:Device {id: 'lg290p_backup_battery', name: 'LG290P RTC backup battery', type: 'battery', chemistry: 'lithium', kicad_symbol: 'Device:Battery_Cell', ref: 'BT1', model: 'not recorded', nominal_voltage: 'not recorded', mounting: 'installed on the LG290P module', notes: 'Lithium backup cell on its own leads, plugged into the LG290P RTC battery connector. Fitted in both the RTK Datalogger and the RTK Base.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'gnss', diagram_order: 28})
+CREATE (bat_pos:Pin {id: 'bat_pos', device: 'lg290p_backup_battery', name: '+', pin_number: 1, type: 'power_out', termination: 'hardwired: lead permanently attached to the cell'})
+CREATE (bat_neg:Pin {id: 'bat_neg', device: 'lg290p_backup_battery', name: '-', pin_number: 2, type: 'ground', termination: 'hardwired: lead permanently attached to the cell'})
+CREATE (battery_plug:Connector {id: 'battery_plug', name: 'Backup battery JST plug', type: '2-position JST housing', series: 'JST; pitch not recorded', positions: 2, user_gender: 'female housing', interpretation_status: 'assumed: the cell has its own leads ending in a 2-position JST housing, as the onboard JST connector requires', notes: 'End of the backup battery leads; plugs into the LG290P RTC battery connector.', enclosure_id: 'rcx_enclosure', enclosure_scope: 'internal', diagram_level: 'primary', diagram_group: 'gnss', diagram_order: 29})
+CREATE (bat_plug_pos:Pin {id: 'bat_plug_pos', connector: 'battery_plug', name: 'BAT+', type: 'power'})
+CREATE (bat_plug_neg:Pin {id: 'bat_plug_neg', connector: 'battery_plug', name: 'GND', type: 'ground'})
+CREATE (battery_leads:Harness {id: 'battery_leads', name: 'Backup battery leads', wires: 2, colors: 'red, black', notes: 'Leads permanently attached to the backup cell, ending in the JST plug.'})
+
+// RTK Base power wiring.
+MATCH (a {id: 'gps_plug_vcc'}), (b {id: 'esp_plug_3v3'}) CREATE (a)-[:WIRE {id: 'w_gps_vcc_to_esp_plug_3v3', variants: ['var_role_base'], color: 'red', signal: '3.3V', harness: 'gps_power_base', color_status: 'proposed', design_status: 'proposed RTK Base wiring', physical: 'LG290P UART cable plug 3.3V to ESP32 3-pin power plug 3V3'}]->(b)
+MATCH (a {id: 'gps_plug_gnd'}), (b {id: 'esp_plug_gnd'}) CREATE (a)-[:WIRE {id: 'w_gps_gnd_to_esp_plug_gnd', variants: ['var_role_base'], color: 'black', signal: 'GND', harness: 'gps_power_base', color_status: 'proposed', design_status: 'proposed RTK Base wiring', physical: 'LG290P UART cable plug GND to ESP32 3-pin power plug GND, doubled with w_esp_plug_gnd_to_fan_gnd'}]->(b)
+
+// LG290P RTC backup battery.
+MATCH (a {id: 'lg290p'}), (b {id: 'lg290p_battery_connector'}) CREATE (a)-[:HAS_CONNECTOR {role: 'RTC backup battery input'}]->(b)
+MATCH (a {id: 'lg290p'}), (b {id: 'gps_bat_pos'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'lg290p'}), (b {id: 'gps_bat_gnd'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'lg290p_battery_connector'}), (b {id: 'gps_bat_pos'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'lg290p_battery_connector'}), (b {id: 'gps_bat_gnd'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'gps_bat_gnd'}), (b {id: 'gps_gnd'}) CREATE (a)-[:ELECTRICALLY_COMMON {net: 'GND', interpretation_status: 'inferred: a backup-battery connector negative contact is the module ground', notes: 'Battery negative is LG290P board ground.'}]->(b)
+MATCH (a {id: 'lg290p_backup_battery'}), (b {id: 'bat_pos'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'lg290p_backup_battery'}), (b {id: 'bat_neg'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'battery_plug'}), (b {id: 'bat_plug_pos'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'battery_plug'}), (b {id: 'bat_plug_neg'}) CREATE (a)-[:HAS_PIN {}]->(b)
+MATCH (a {id: 'battery_plug'}), (b {id: 'lg290p_battery_connector'}) CREATE (a)-[:MATES_WITH {series: 'JST', positions: 2, detachable: true}]->(b)
+MATCH (a {id: 'bat_plug_pos'}), (b {id: 'gps_bat_pos'}) CREATE (a)-[:MATES_WITH {signal: 'RTC_BACKUP'}]->(b)
+MATCH (a {id: 'bat_plug_neg'}), (b {id: 'gps_bat_gnd'}) CREATE (a)-[:MATES_WITH {signal: 'GND'}]->(b)
+MATCH (a {id: 'bat_pos'}), (b {id: 'bat_plug_pos'}) CREATE (a)-[:WIRE {id: 'w_battery_pos', signal: 'RTC_BACKUP', color: 'red', harness: 'battery_leads', physical: 'Backup cell + lead to the JST plug BAT+ position'}]->(b)
+MATCH (a {id: 'bat_neg'}), (b {id: 'bat_plug_neg'}) CREATE (a)-[:WIRE {id: 'w_battery_neg', signal: 'GND', color: 'black', harness: 'battery_leads', physical: 'Backup cell - lead to the JST plug GND position'}]->(b)
+MATCH (a {id: 'rcx_enclosure'}), (b {id: 'lg290p_backup_battery'}) CREATE (a)-[:CONTAINS {}]->(b)
+MATCH (a {id: 'rcx_enclosure'}), (b {id: 'battery_plug'}) CREATE (a)-[:CONTAINS {}]->(b)
+
 // Configuration alternatives.
+MATCH (a {id: 'vp_role'}), (b {id: 'var_role_logger'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
+MATCH (a {id: 'vp_role'}), (b {id: 'var_role_base'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
 MATCH (a {id: 'vp_usb_c'}), (b {id: 'var_usb_power'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
 MATCH (a {id: 'vp_usb_c'}), (b {id: 'var_usb_pc'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
+MATCH (a {id: 'vp_vehicle_bus'}), (b {id: 'var_typical_obd'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
 MATCH (a {id: 'vp_vehicle_bus'}), (b {id: 'var_718_chassis'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
 MATCH (a {id: 'vp_vehicle_bus'}), (b {id: 'var_718_drive'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
 MATCH (a {id: 'vp_vehicle_bus'}), (b {id: 'var_987_2_drive'}) CREATE (a)-[:HAS_VARIANT {}]->(b)
@@ -977,6 +1026,14 @@ MATCH (a {id: 'porsche_718'}), (b {id: 'porsche_718_can_chassis'}) CREATE (a)-[:
 MATCH (a {id: 'positap_can_h'}), (b {id: 'porsche_718_can_chassis'}) CREATE (a)-[:TAPS_VEHICLE_CAN {vehicle_id: 'porsche_718', bus_name: 'Chassis CAN', signal: 'CAN-H', polarity: '+', vehicle_wire_color: 'ORG/VIO', vehicle_wire_color_full: 'orange/violet', color_status: 'unconfirmed: owner recollection; no readable source found', color_source: 'Owner recollection (orange/purple). Consistent with the VAG pattern (orange base, bus-specific stripe on CAN-High), but VW service information assigns orange/violet to the infotainment CAN; the Rennlist thread "718 CAN Chassis Bus Decoding" could not be opened to confirm.'}]->(b)
 MATCH (a {id: 'positap_can_l'}), (b {id: 'porsche_718_can_chassis'}) CREATE (a)-[:TAPS_VEHICLE_CAN {vehicle_id: 'porsche_718', bus_name: 'Chassis CAN', signal: 'CAN-L', polarity: '-', vehicle_wire_color: 'ORG/BRN', vehicle_wire_color_full: 'orange/brown', color_status: 'unconfirmed for this bus; matches the VAG convention', color_source: 'Owner recollection; VW service information gives orange/brown for every CAN-Low. No 718 chassis-specific source could be opened.'}]->(b)
 
+// Typical Vehicle: the OBD-II lead plugs into the car's diagnostic port.
+MATCH (a {id: 'typical_vehicle'}), (b {id: 'typical_vehicle_can'}) CREATE (a)-[:HAS_CAN_BUS {}]->(b)
+MATCH (a {id: 'typical_vehicle_can'}), (b {id: 'typical_obd_port'}) CREATE (a)-[:HAS_CONNECTOR {}]->(b)
+MATCH (a {id: 'typical_obd_port'}), (b {id: 'typical_obd_6'}) CREATE (a)-[:HAS_PIN {position: 6}]->(b)
+MATCH (a {id: 'typical_obd_port'}), (b {id: 'typical_obd_14'}) CREATE (a)-[:HAS_PIN {position: 14}]->(b)
+MATCH (a {id: 'obd_lead_plug'}), (b {id: 'typical_obd_port'}) CREATE (a)-[:MATES_WITH {standard: 'SAE J1962', detachable: true}]->(b)
+MATCH (a {id: 'obd_plug_6'}), (b {id: 'typical_obd_6'}) CREATE (a)-[:MATES_WITH {position: 6, signal: 'CAN-H'}]->(b)
+MATCH (a {id: 'obd_plug_14'}), (b {id: 'typical_obd_14'}) CREATE (a)-[:MATES_WITH {position: 14, signal: 'CAN-L'}]->(b)
 // Scion FR-S: the OBD-II lead plugs into the car's diagnostic port.
 MATCH (a {id: 'scion_frs'}), (b {id: 'scion_frs_can'}) CREATE (a)-[:HAS_CAN_BUS {}]->(b)
 MATCH (a {id: 'scion_frs_can'}), (b {id: 'frs_obd_port'}) CREATE (a)-[:HAS_CONNECTOR {}]->(b)
@@ -994,6 +1051,7 @@ MATCH (a {id: 'obd_lead_pin2'}), (b {id: 'obd_plug_6'}) CREATE (a)-[:WIRE {id: '
 MATCH (a {id: 'obd_lead_plug'}), (b {id: 'frs_obd_port'}) CREATE (a)-[:MATES_WITH {standard: 'SAE J1962', detachable: true}]->(b)
 MATCH (a {id: 'obd_plug_6'}), (b {id: 'frs_obd_6'}) CREATE (a)-[:MATES_WITH {position: 6, signal: 'CAN-H'}]->(b)
 MATCH (a {id: 'obd_plug_14'}), (b {id: 'frs_obd_14'}) CREATE (a)-[:MATES_WITH {position: 14, signal: 'CAN-L'}]->(b)
+
 </script>
 <script type="application/json" id="rules-profile">{
   "about": "Rules that map graph labels, relationship types and properties onto schematic roles. Edit and the drawing updates.",
@@ -1016,14 +1074,15 @@ MATCH (a {id: 'obd_plug_14'}), (b {id: 'frs_obd_14'}) CREATE (a)-[:MATES_WITH {p
       "male": "/\\bmale\\b|header|\\bplug\\b/i"
     },
     "leadPins": [
-      { "key": "termination", "match": "/flying lead/i" }
+      { "key": "termination", "match": "/flying lead|hardwired/i" }
     ],
-    "leadCaption": "flying leads, no connector"
+    "leadCaption": "hardwired leads, no connector"
   },
   "variants": {
     "pointLabels": ["VariationPoint"],
     "optionRelationships": ["HAS_VARIANT"],
     "defaultKeys": ["default_variant"],
+    "appliesKeys": ["applies_when"],
     "memberKeys": ["variants"]
   },
   "connections": {
@@ -3874,6 +3933,35 @@ MATCH (a {id: 'obd_plug_14'}), (b {id: 'frs_obd_14'}) CREATE (a)-[:MATES_WITH {p
         (number "1" (effects (font (size 1.27 1.27)))))
       (pin passive line (at 3.81 0 180) (length 2.54)
         (name "A" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+  (symbol "Battery_Cell"
+    (pin_numbers hide)
+    (pin_names (offset 0) hide)
+    (in_bom yes) (on_board yes)
+    (property "Reference" "BT" (at 2.54 2.54 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "Battery_Cell" (at 2.54 0 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 1.524 90)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "" (at 0 1.524 90)
+      (effects (font (size 1.27 1.27)) hide))
+    (symbol "Battery_Cell_0_1"
+      (rectangle (start -2.286 1.778) (end 2.286 1.524) (stroke (width 0) (type default)) (fill (type outline)))
+      (rectangle (start -1.5748 1.1938) (end 1.4732 0.6858) (stroke (width 0) (type default)) (fill (type outline)))
+      (polyline (pts (xy 0 0.762) (xy 0 0)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy 0 1.778) (xy 0 2.54)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy 0.508 3.429) (xy 1.524 3.429)) (stroke (width 0.254) (type default)) (fill (type none)))
+      (polyline (pts (xy 1.016 3.937) (xy 1.016 2.921)) (stroke (width 0.254) (type default)) (fill (type none)))
+    )
+    (symbol "Battery_Cell_1_1"
+      (pin passive line (at 0 5.08 270) (length 2.54)
+        (name "+" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 0 -2.54 90) (length 2.54)
+        (name "-" (effects (font (size 1.27 1.27))))
         (number "2" (effects (font (size 1.27 1.27)))))
     )
   )
@@ -11918,7 +12006,9 @@ module.exports = browser_default;
    * selection (point id -> variant id, falling back to each point's default) picks one variant
    * per point; an element survives when, for every point its list mentions, the selected
    * variant is on the list. Elements that list nothing are in every configuration. Removing a
-   * node removes its relationships.
+   * node removes its relationships. A point that names variants of other points under an
+   * applies key is not applicable unless one of them is selected; its choice is then N/A and
+   * every element that mentions it is removed.
    */
   function configure(graph, profile, selection = {}) {
     const V = profile.variants;
@@ -11946,6 +12036,13 @@ module.exports = browser_default;
       for (const o of options) pointOf.set(o.id, point);
       points.push(point);
     }
+    for (const point of points) {
+      const raw = first(point.node.props, V.appliesKeys || []);
+      const when = raw === undefined ? [] : (Array.isArray(raw) ? raw : [raw]).map(String);
+      const known = when.filter((v) => pointOf.has(v) && pointOf.get(v) !== point);
+      if (known.length < when.length) notes.push({ level: "warning", line: point.node.lines[0], message: `${point.name}: applies only with ${when.filter((v) => !known.includes(v)).join(", ")}, which no other variation point offers.` });
+      point.applicable = !known.length || known.some((v) => pointOf.get(v).selected === v);
+    }
     const listOf = (props) => {
       for (const k of V.memberKeys || []) if (props[k] !== undefined) return (Array.isArray(props[k]) ? props[k] : [props[k]]).map(String);
       return null;
@@ -11956,12 +12053,12 @@ module.exports = browser_default;
       const unknown = list.filter((v) => !pointOf.has(v));
       if (unknown.length) notes.push({ level: "warning", line: el.lines?.[0], message: `${unknown.join(", ")} ${unknown.length > 1 ? "are" : "is"} listed as a variant but no variation point offers ${unknown.length > 1 ? "them" : "it"}.` });
       const mentioned = new Set(list.filter((v) => pointOf.has(v)).map((v) => pointOf.get(v)));
-      return [...mentioned].every((pt) => list.includes(pt.selected));
+      return [...mentioned].every((pt) => pt.applicable && list.includes(pt.selected));
     };
     const nodes = new Map([...graph.nodes].filter(([, n]) => keep(n)));
     const rels = new Map([...graph.rels].filter(([, r]) => nodes.has(r.start) && nodes.has(r.end) && keep(r)));
     const dropped = graph.nodes.size - nodes.size;
-    if (points.length && dropped) notes.push({ level: "info", message: `Showing ${points.map((pt) => pt.options.find((o) => o.id === pt.selected).name).join(" · ")}; ${dropped} elements of other configurations are hidden.` });
+    if (points.length && dropped) notes.push({ level: "info", message: `Showing ${points.filter((pt) => pt.applicable).map((pt) => pt.options.find((o) => o.id === pt.selected).name).join(" · ")}; ${dropped} elements of other configurations are hidden.` });
     const out = new Map(), inn = new Map();
     for (const r of rels.values()) {
       if (!out.has(r.start)) out.set(r.start, []); out.get(r.start).push(r);
@@ -12091,7 +12188,7 @@ module.exports = browser_default;
       ...(S.logicalPinKeys || []).map((key) => ({ key, equals: true })),
       ...(S.logicalPins || []),
     ];
-    // Lead pins are wires leaving a part with no connector at that end (a fan's flying leads).
+    // Lead pins are wires leaving a part with no connector at that end (a fan's hardwired leads).
     const leadPin = (pin) => (S.leadPins || []).some((r) => {
       const v = pin.props[r.key];
       if (v === undefined) return false;
@@ -12898,7 +12995,8 @@ module.exports = browser_default;
     for (const pin of pins) {
       const c = pin.contact;
       if (!c || !c.name || (!lib.pinNamesHidden && pin.lib.name && pin.lib.name !== "~")) continue;
-      if (c.name === pin.lib.number) continue;
+      // A name the symbol already shows (its pin number, or a polarity its graphics mark) is not repeated.
+      if (c.name === pin.lib.number || c.name === pin.lib.name) continue;
       const w = measure(c.name, CAPTION_SIZE + 4);
       if (pin.side === "WEST" || pin.side === "EAST") {
         if (!faceUsed) {
@@ -13395,6 +13493,14 @@ module.exports = browser_default;
 
     const sides = { port: new Map(), ports: new Map() };
     const geo = new Map();
+    // Contacts whose mate is a library connector drawing pins beyond the mated ones.
+    const extraPins = (P) => P && P.kind === "lib" && P.role === "connector" && (P.lib?.pins || []).filter((pp) => !pp.hidden).length > [...P.contacts.values()].filter((c) => c.visible).length;
+    const wideMates = new Set();
+    for (const c of conns) {
+      if (c.style !== "mate" || !c.b) continue;
+      if (extraPins(symById.get(c.a.symbolId))) wideMates.add(c.b);
+      if (extraPins(symById.get(c.b.symbolId))) wideMates.add(c.a);
+    }
     for (const s of symbols) {
       const node = placed1.get(s.id);
       const vis = [...s.contacts.values()].filter((c) => c.visible);
@@ -13403,6 +13509,9 @@ module.exports = browser_default;
         return pt ? sideOfPoint(pt.x, pt.y, node) : null;
       };
       if (s.kind === "box") {
+        // A section whose mating plug draws more than its mated positions (a coax shield pin) goes to
+        // the nearer end of its edge, so the extra pins reach past the box edge instead of into a neighbour.
+        const wideOf = (key) => vis.some((c) => (c.section?.key || "") === key && wideMates.has(c));
         const buckets = { WEST: [], EAST: [], NORTH: [], SOUTH: [] };
         for (const c of vis) {
           let side = hintSide(s, c) || sideOf(c, "tip") || guessSide(s, c);
@@ -13413,10 +13522,18 @@ module.exports = browser_default;
           const list = buckets[side];
           const pos = (c) => { const pt = placed1.get(portId(c, "tip")); return pt ? (side === "WEST" || side === "EAST" ? pt.y : pt.x) : 0; };
           const hinted = list.every((c) => hintSide(s, c) && c.order !== undefined && c.order !== null);
+          const ps = list.map(pos).sort((x, y) => x - y), mid = ps.length ? (ps[0] + ps[ps.length - 1]) / 2 : 0;
+          const endOf = (key) => {
+            if (!wideOf(key)) return 0;
+            const at = Math.min(...list.filter((x) => (x.section?.key || "") === key).map(pos));
+            return at <= mid ? -1 : 1;
+          };
           list.sort((a, b) => {
             if (hinted) return Scene.compareNatural(a.order, b.order);
             const sa = a.section?.key || "", sb = b.section?.key || "";
             if (sa !== sb) {
+              const ea = endOf(sa), eb = endOf(sb);
+              if (ea !== eb) return ea - eb;
               const ma = Math.min(...list.filter((x) => (x.section?.key || "") === sa).map(pos));
               const mb = Math.min(...list.filter((x) => (x.section?.key || "") === sb).map(pos));
               return ma - mb;
@@ -14057,10 +14174,11 @@ module.exports = browser_default;
     for (const c of layout.connections) {
       const e = layout.edges.get(c.id);
       if (!e) continue;
-      for (const sec of e.bus ? entryRuns.get(c.id) || [] : e.sections) for (let k = 1; k < sec.length; k++) segsAll.push({ a: sec[k - 1], b: sec[k], net: c.net?.key || c.id });
+      for (const sec of e.bus ? entryRuns.get(c.id) || [] : e.sections) for (let k = 1; k < sec.length; k++) segsAll.push({ a: sec[k - 1], b: sec[k], net: c.net?.key || c.id, conn: c.id });
     }
-    for (const b of layout.bundles || []) for (const run of [b.path, ...b.ends.map((en) => en.spine)]) for (let k = 1; k < run.length; k++) segsAll.push({ a: run[k - 1], b: run[k], net: "" });
-    const footprints = [...layout.symbols.values()].map((sv) => ({ x: sv.x, y: sv.y, w: sv.w, h: sv.h }));
+    for (const b of layout.bundles || []) for (const run of [b.path, ...b.ends.map((en) => en.spine)]) for (let k = 1; k < run.length; k++) segsAll.push({ a: run[k - 1], b: run[k], net: "", conn: `bus:${b.bundle.id}` });
+    // Parts as drawn (body, pins and texts) when the page has measured them; else each part's whole box.
+    const footprints = opts.labelFootprints || [...layout.symbols.values()].map((sv) => ({ x: sv.x, y: sv.y, w: sv.w, h: sv.h }));
     const placedLabels = [];
     const meets = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
     const distToSeg = ([px, py], a, b) => {
@@ -14072,77 +14190,6 @@ module.exports = browser_default;
       const [x1, x2] = [Math.min(sg.a[0], sg.b[0]), Math.max(sg.a[0], sg.b[0])], [y1, y2] = [Math.min(sg.a[1], sg.b[1]), Math.max(sg.a[1], sg.b[1])];
       return x1 <= r.x + r.w && x2 >= r.x && y1 <= r.y + r.h && y2 >= r.y;
     };
-    if (opts.netLabels) {
-      const byNet = new Map();
-      for (const c of layout.connections) {
-        if (!c.net || c.bundle || c.style === "join" || c.style === "interface" || c.style === "mate") continue;
-        const e = layout.edges.get(c.id);
-        if (!e) continue;
-        if (!byNet.has(c.net.key)) byNet.set(c.net.key, { net: c.net, segs: [] });
-        for (const [a, b] of segmentsOf(e.sections)) if (Math.abs(a[1] - b[1]) < 0.5) byNet.get(c.net.key).segs.push(a[0] < b[0] ? [a, b] : [b, a]);
-      }
-      for (const { net, segs } of byNet.values()) {
-        const w = measure(net.name, 44) + 36;
-        segs.sort((p, q) => (q[1][0] - q[0][0]) - (p[1][0] - p[0][0]));
-        let spot = null;
-        for (const [a, b] of segs) {
-          const len = b[0] - a[0];
-          if (len < w + 90) continue;
-          // Above the wire as KiCad places labels, else below; the band out to the next grid line
-          // must hold no other net, so the label cannot be read as naming a neighbour.
-          for (const below of [false, true]) {
-            for (const x of [a[0] + 70, (a[0] + b[0] - w) / 2, b[0] - w - 20]) {
-              const r = { x: x - 18, y: below ? a[1] + 12 : a[1] - 78, w, h: 58 };
-              const band = { x: r.x, y: below ? a[1] + 4 : a[1] - 100, w, h: 96 };
-              const host = (sg) => Math.abs(sg.a[1] - a[1]) < 0.5 && Math.abs(sg.b[1] - a[1]) < 0.5 && sg.net === net.key;
-              // Its own net's other runs may not pass under it either: the label would cut the wire.
-              if (footprints.some((q) => meets(r, q)) || placedLabels.some((q) => meets(r, q)) || segsAll.some((sg) => (sg.net !== net.key && segHits(sg, band)) || (!host(sg) && segHits(sg, r)))) continue;
-              spot = { x, y: below ? a[1] + 56 : a[1] - 34, r };
-              break;
-            }
-            if (spot) break;
-          }
-          if (spot) break;
-        }
-        if (!spot) continue;
-        placedLabels.push(spot.r);
-        out.push(`<g class="net-label" data-net="${esc(net.key)}"><rect x="${f(spot.r.x)}" y="${f(spot.r.y)}" width="${f(w)}" height="58" rx="8"/><text x="${f(spot.x)}" y="${f(spot.y)}">${esc(net.name)}</text></g>`);
-      }
-    }
-    if (opts.wireTags) {
-      for (const c of layout.connections) {
-        if (c.bundle || (!c.color && !c.props?.gauge)) continue;
-        const e = layout.edges.get(c.id);
-        if (!e) continue;
-        const text = [c.color?.label?.toUpperCase().replace(/\s+/g, ""), c.props?.gauge].filter(Boolean).join(" · ");
-        const w = measure(text, 36) + 30;
-        const own = c.net?.key || c.id;
-        const segs = segmentsOf(e.sections).map(([a, b]) => ({ a, b, len: Math.hypot(a[0] - b[0], a[1] - b[1]), horizontal: Math.abs(a[1] - b[1]) < 0.5 })).filter((sg) => sg.len >= 300).sort((p, q) => q.len - p.len);
-        let spot = null;
-        for (const sg of segs) {
-          for (const t of [0.5, 0.3, 0.7]) {
-            const mx = sg.a[0] + (sg.b[0] - sg.a[0]) * t, my = sg.a[1] + (sg.b[1] - sg.a[1]) * t;
-            const tries = sg.horizontal ? [[mx - w / 2, my + 30], [mx - w / 2, my - 80]] : [[mx + 30, my - 24], [mx - 30 - w, my - 24]];
-            for (const [x, y] of tries) {
-              const r = { x, y, w, h: 50 };
-              // Keep other nets well clear, so the tag is nearest the wire it describes.
-              const band = { x: r.x - 60, y: r.y - 60, w: r.w + 120, h: r.h + 120 };
-              // A wide tag beside a vertical run reaches far from it; its centre must still lie
-              // nearer its own wire than any other net's.
-              const centre = [r.x + r.w / 2, r.y + r.h / 2], mine = distToSeg(centre, sg.a, sg.b);
-              if (footprints.some((q) => meets(r, q)) || placedLabels.some((q) => meets(r, q)) || segsAll.some((o) => o.net !== own && (segHits(o, band) || distToSeg(centre, o.a, o.b) <= mine + 20))) continue;
-              spot = r;
-              break;
-            }
-            if (spot) break;
-          }
-          if (spot) break;
-        }
-        if (!spot) continue;
-        placedLabels.push(spot);
-        out.push(`<g class="wire-tag" data-conn="${esc(c.id)}" data-net="${esc(c.net?.key || "")}"><rect x="${f(spot.x)}" y="${f(spot.y)}" width="${f(w)}" height="50" rx="6"/><text x="${f(spot.x + 15)}" y="${f(spot.y + 36)}">${esc(text)}</text></g>`);
-      }
-    }
     // Hierarchical labels on enclosure ports.
     for (const iface of scene.interfaces) {
       for (const port of iface.ports) {
@@ -14153,6 +14200,7 @@ module.exports = browser_default;
         const west = pt.side !== "EAST";
         const x0 = west ? pt.x - w - 40 : pt.x + 40;
         const tipX = west ? pt.x - 40 : pt.x + 40;
+        placedLabels.push({ x: Math.min(x0, pt.x), y: pt.y - 32, w: w + 40, h: 64 });
         const shape = west
           ? `${f(x0)},${f(pt.y - 32)} ${f(tipX - 32)},${f(pt.y - 32)} ${f(tipX)},${f(pt.y)} ${f(tipX - 32)},${f(pt.y + 32)} ${f(x0)},${f(pt.y + 32)}`
           : `${f(tipX)},${f(pt.y)} ${f(tipX + 32)},${f(pt.y - 32)} ${f(x0 + w)},${f(pt.y - 32)} ${f(x0 + w)},${f(pt.y + 32)} ${f(tipX + 32)},${f(pt.y + 32)}`;
@@ -14183,13 +14231,143 @@ module.exports = browser_default;
       }
       hits.sort((a, b) => a.y - b.y || a.x - b.x);
       const mid = hits[Math.floor((hits.length - 1) / 2)];
+      for (const h of hits) placedLabels.push({ x: h.x - 22, y: h.y - 22, w: 44, h: 44 });
       for (const h of hits) out.push(`<rect class="cross-mark" x="${f(h.x - 22)}" y="${f(h.y - 22)}" width="44" height="44"/>`);
       const text = iface.label;
       const w = measure(text, 40) + 60;
       const above = Math.min(...hits.map((h) => h.y)) - 120;
       const x = mid.side === "WEST" ? mid.x - w - 60 : mid.side === "EAST" ? mid.x + 60 : mid.x - w / 2;
       const y = mid.side === "NORTH" ? mid.y - 140 : mid.side === "SOUTH" ? mid.y + 80 : above - 30;
+      placedLabels.push({ x, y, w, h: 64 });
       out.push(`<g class="iface-tag" data-iface="${esc(iface.id)}"><rect x="${f(x)}" y="${f(y)}" width="${f(w)}" height="64" rx="32"/><text x="${f(x + w / 2)}" y="${f(y + 32)}" text-anchor="middle" dominant-baseline="central">${esc(text)}</text></g>`);
+    }
+    // Wire labels: wire functions (the signal name of a net) and wire colors (colour code and gauge).
+    // One rule places both. A label is never drawn over a part, a text, another label, a junction
+    // or pin end, or any wire other than the one it names. In order of preference it sits:
+    //   1. on its own wire, centred over a straight horizontal run, with bare wire either side;
+    //   2. on its own wire, centred over a straight vertical run;
+    //   3. beside a run of its own wire, nearer that wire than any other;
+    // and a label with no such place is left out (the Inspector and Tables still list it).
+    const LABEL_GAP = 36, ON_WIRE_MARGIN = 50, WIRE_CLEAR = 34;
+    const widthFactor = opts.labelWidthFactor > 1 ? opts.labelWidthFactor : 1;
+    const labelWidth = (text, size, pad) => measure(text, size) * widthFactor + pad;
+    // Texts the page measured on an earlier pass (part names, pin names, bus labels, frame titles).
+    for (const q of opts.labelObstacles || []) placedLabels.push(q);
+    for (const b of layout.bundles || []) {
+      const L = b.label;
+      if (L && isFinite(L.x)) placedLabels.push({ x: L.x, y: L.y, w: measure(L.text, 44) + 40, h: L.h });
+    }
+    for (const g of layout.groups.values()) {
+      placedLabels.push({ x: g.x + 80, y: g.y + 70, w: measure(g.group.name, 52) + 20, h: 64 });
+      if (g.group.subtitle) placedLabels.push({ x: g.x + 80, y: g.y + 150, w: measure(g.group.subtitle, 36) + 20, h: 50 });
+    }
+    // Junction dots and pin ends: a label must not hide where conductors meet.
+    const dots = [];
+    for (const sv of layout.symbols.values()) for (const pin of sv.geo.pins) dots.push([sv.x + pin.tip[0], sv.y + pin.tip[1]]);
+    for (const c of layout.connections) {
+      const e = layout.edges.get(c.id);
+      if (!e || !e.sections.length) continue;
+      for (const j of e.junctions) dots.push(j);
+      for (const sec of e.sections) { dots.push(sec[0]); dots.push(sec[sec.length - 1]); }
+    }
+    const padded = (r, g = LABEL_GAP) => ({ x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g });
+    const sameLine = (sg, host) => {
+      if (!host) return false;
+      const hz = Math.abs(host.a[1] - host.b[1]) < 0.5;
+      if (hz) return Math.abs(sg.a[1] - host.a[1]) < 0.5 && Math.abs(sg.b[1] - host.a[1]) < 0.5 && sg.conn === host.conn;
+      return Math.abs(sg.a[0] - host.a[0]) < 0.5 && Math.abs(sg.b[0] - host.a[0]) < 0.5 && sg.conn === host.conn;
+    };
+    // `host` is the run the label lies on (rules 1 and 2), or null for a label beside its wire.
+    const spotFree = (r, host) => {
+      const pr = padded(r);
+      if (footprints.some((q) => meets(pr, q)) || placedLabels.some((q) => meets(pr, q))) return false;
+      const keep = padded(r, 18);
+      if (dots.some(([x, y]) => x >= keep.x && x <= keep.x + keep.w && y >= keep.y && y <= keep.y + keep.h)) return false;
+      const band = padded(r, WIRE_CLEAR);
+      return !segsAll.some((sg) => !sameLine(sg, host) && segHits(sg, band));
+    };
+    // Every straight run of the given connections, longest first.
+    const runsOf = (conns) => {
+      const runs = [];
+      for (const c of conns) {
+        const e = layout.edges.get(c.id);
+        if (!e) continue;
+        for (const [a, b] of segmentsOf(e.sections)) {
+          const hz = Math.abs(a[1] - b[1]) < 0.5, vt = Math.abs(a[0] - b[0]) < 0.5;
+          if (!hz && !vt) continue;
+          const [p, q] = hz ? (a[0] < b[0] ? [a, b] : [b, a]) : (a[1] < b[1] ? [a, b] : [b, a]);
+          runs.push({ a: p, b: q, conn: c.id, hz, len: hz ? q[0] - p[0] : q[1] - p[1] });
+        }
+      }
+      return runs.sort((p, q) => q.len - p.len);
+    };
+    const FRACTIONS = [0.5, 0.35, 0.65, 0.2, 0.8];
+    const findSpot = (runs, w, h) => {
+      // 1. Over a horizontal run.
+      for (const run of runs) {
+        if (!run.hz || run.len < w + 2 * ON_WIRE_MARGIN) continue;
+        for (const k of FRACTIONS) {
+          const x = Math.min(Math.max(run.a[0] + run.len * k - w / 2, run.a[0] + ON_WIRE_MARGIN), run.b[0] - ON_WIRE_MARGIN - w);
+          const r = { x, y: run.a[1] - h / 2, w, h };
+          if (spotFree(r, run)) return r;
+        }
+      }
+      // 2. Over a vertical run.
+      for (const run of runs) {
+        if (run.hz || run.len < h + 2 * ON_WIRE_MARGIN) continue;
+        for (const k of FRACTIONS) {
+          const y = Math.min(Math.max(run.a[1] + run.len * k - h / 2, run.a[1] + ON_WIRE_MARGIN), run.b[1] - ON_WIRE_MARGIN - h);
+          const r = { x: run.a[0] - w / 2, y, w, h };
+          if (spotFree(r, run)) return r;
+        }
+      }
+      // 3. Beside a run, nearest its own wire.
+      const OFF = 22;
+      for (const run of runs) {
+        if (run.len < (run.hz ? w : h) + 40) continue;
+        for (const k of FRACTIONS) {
+          const mx = run.a[0] + (run.b[0] - run.a[0]) * k, my = run.a[1] + (run.b[1] - run.a[1]) * k;
+          const tries = run.hz
+            ? [[mx - w / 2, my - OFF - h], [mx - w / 2, my + OFF]]
+            : [[mx + OFF, my - h / 2], [mx - OFF - w, my - h / 2]];
+          for (const [x, y] of tries) {
+            const r = { x, y, w, h };
+            if (!spotFree(r, null)) continue;
+            // Its centre must lie nearer its own wire than any other.
+            const centre = [x + w / 2, y + h / 2], mine = distToSeg(centre, run.a, run.b);
+            if (segsAll.some((o) => o.conn !== run.conn && distToSeg(centre, o.a, o.b) <= mine + 40)) continue;
+            return r;
+          }
+        }
+      }
+      return null;
+    };
+    const wired = (c) => !c.bundle && c.style !== "join" && c.style !== "interface" && c.style !== "mate";
+    if (opts.netLabels) {
+      const byNet = new Map();
+      for (const c of layout.connections) {
+        if (!c.net || !wired(c) || !layout.edges.get(c.id)) continue;
+        if (!byNet.has(c.net.key)) byNet.set(c.net.key, { net: c.net, conns: [] });
+        byNet.get(c.net.key).conns.push(c);
+      }
+      for (const { net, conns } of byNet.values()) {
+        const w = labelWidth(net.name, 44, 36), h = 58;
+        const spot = findSpot(runsOf(conns), w, h);
+        if (!spot) continue;
+        placedLabels.push(spot);
+        out.push(`<g class="net-label" data-net="${esc(net.key)}"><rect x="${f(spot.x)}" y="${f(spot.y)}" width="${f(w)}" height="${h}" rx="8"/><text x="${f(spot.x + w / 2)}" y="${f(spot.y + h / 2)}" text-anchor="middle" dominant-baseline="central">${esc(net.name)}</text></g>`);
+      }
+    }
+    if (opts.wireTags) {
+      for (const c of layout.connections) {
+        if (!wired(c) || (!c.color && !c.props?.gauge) || !layout.edges.get(c.id)) continue;
+        const text = [c.color?.label?.toUpperCase().replace(/\s+/g, ""), c.props?.gauge].filter(Boolean).join(" · ");
+        const w = labelWidth(text, 36, 30), h = 50;
+        const spot = findSpot(runsOf([c]), w, h);
+        if (!spot) continue;
+        placedLabels.push(spot);
+        out.push(`<g class="wire-tag" data-conn="${esc(c.id)}" data-net="${esc(c.net?.key || "")}"><rect x="${f(spot.x)}" y="${f(spot.y)}" width="${f(w)}" height="${h}" rx="6"/><text x="${f(spot.x + w / 2)}" y="${f(spot.y + h / 2)}" text-anchor="middle" dominant-baseline="central">${esc(text)}</text></g>`);
+      }
     }
     out.push(`</g>`);
 
@@ -15089,7 +15267,7 @@ module.exports = browser_default;
     sourceName: embedded.name,
     rulesText: compactJson(JSON.parse(embedded.rules)),
     extraLibs: [],
-    options: { physical: false, wireColors: "physical", showUnconnected: false, netLabels: true, wireTags: false },
+    options: { physical: true, wireColors: "physical", showUnconnected: true, netLabels: false, wireTags: false },
     library: null,
     result: null,
     scene: null,
@@ -15101,8 +15279,10 @@ module.exports = browser_default;
     ruleError: null,
   };
 
-  const savedOptions = store.get("kg-viewer:options");
+  const savedOptions = store.get("rcx-hardware-viewer:options");
   if (savedOptions) { try { Object.assign(state.options, JSON.parse(savedOptions)); } catch { /* ignore */ } }
+  // Wires are always drawn in their recorded colours; the toolbar only switches the colour words.
+  state.options.wireColors = "physical";
   const draft = store.get(draftKey);
   if (draft) {
     try {
@@ -15207,16 +15387,85 @@ module.exports = browser_default;
       counts: `${result.graph.nodes.size} nodes · ${result.graph.rels.size} relationships`,
       libraries: `KiCad ${[...state.library.libs.keys()].join(", ")}`,
     };
-    const out = KGRender.renderSvg(scene, layout, meta, state.options, measure);
+    let out = KGRender.renderSvg(scene, layout, meta, state.options, measure);
     const host = $("#sheet");
     const keepView = state.view && state.lastFrameKey === `${Math.round(out.viewBox.w)}x${Math.round(out.viewBox.h)}`;
     host.innerHTML = out.svg;
+    if (state.options.netLabels || state.options.wireTags) {
+      // Wire labels are placed again against the texts as the browser really draws them, so a
+      // label never lands on a part name, pin name or caption, whatever font the browser uses.
+      const svg = host.querySelector("svg");
+      const parts = renderedBoxes(svg, ".symbols .symbol :is(path, rect, polyline, polygon, circle, line, text):not(.sym-hit)");
+      const obstacles = renderedBoxes(svg, ".bus-label, .group-title, .group-sub, .hier-label, .iface-tag");
+      out = KGRender.renderSvg(scene, layout, meta, { ...state.options, labelFootprints: parts, labelObstacles: obstacles, labelWidthFactor: labelWidthFactor(svg) }, measure);
+      host.innerHTML = out.svg;
+      dropCollidingLabels(host.querySelector("svg"), [...parts, ...obstacles]);
+    }
     state.svg = host.querySelector("svg");
     state.frame = out;
     state.lastFrameKey = `${Math.round(out.viewBox.w)}x${Math.round(out.viewBox.h)}`;
     state.svg.classList.toggle("kicad-wires", state.options.wireColors !== "physical");
     if (keepView) applyView(); else fit();
     if (state.selection) markSelection();
+  }
+
+  /** Boxes of the matched elements in drawing coordinates, transforms included. */
+  function renderedBoxes(svg, selector) {
+    const boxes = [];
+    const toSheet = svg.getScreenCTM();
+    if (!toSheet) return boxes;
+    const inv = toSheet.inverse();
+    for (const el of svg.querySelectorAll(selector)) {
+      let b;
+      try { b = el.getBBox(); } catch { continue; }
+      if (!b.width && !b.height) continue;
+      const m = inv.multiply(el.getScreenCTM());
+      const xs = [], ys = [];
+      for (const [x, y] of [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]]) {
+        xs.push(m.a * x + m.c * y + m.e);
+        ys.push(m.b * x + m.d * y + m.f);
+      }
+      const x = Math.min(...xs), y = Math.min(...ys);
+      boxes.push({ x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y });
+    }
+    return boxes;
+  }
+
+  /** How much wider the browser draws label text than the canvas measured it (1 when it agrees). */
+  function labelWidthFactor(svg) {
+    let factor = 1;
+    for (const [sel, size] of [[".net-label text", 44], [".wire-tag text", 36]]) {
+      for (const t of svg.querySelectorAll(sel)) {
+        const want = measure(t.textContent, size);
+        let got = 0;
+        try { got = t.getComputedTextLength(); } catch { /* not rendered */ }
+        if (want > 0 && got > 0) factor = Math.max(factor, got / want);
+      }
+    }
+    return Math.min(factor, 1.5);
+  }
+
+  /**
+   * Last guard: fit each wire label's box to its drawn text, and leave out any label that would
+   * still touch another label or a text, so labels never overlap.
+   */
+  function dropCollidingLabels(svg, obstacles) {
+    const meets = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
+    const kept = [...obstacles];
+    for (const g of svg.querySelectorAll(".net-label, .wire-tag")) {
+      const rect = g.querySelector("rect"), text = g.querySelector("text");
+      let tb;
+      try { tb = text.getBBox(); } catch { continue; }
+      const x = +rect.getAttribute("x"), y = +rect.getAttribute("y"), w = +rect.getAttribute("width"), h = +rect.getAttribute("height");
+      const need = tb.width + 24;
+      if (need > w) {
+        rect.setAttribute("x", String(x - (need - w) / 2));
+        rect.setAttribute("width", String(need));
+      }
+      const box = { x: Math.min(x, x - (need - w) / 2), y, w: Math.max(w, need), h };
+      if (kept.some((q) => meets(box, q))) { g.remove(); continue; }
+      kept.push(box);
+    }
   }
 
   // ------------------------------------------------------------------ pan and zoom
@@ -15594,7 +15843,8 @@ module.exports = browser_default;
       : scene.connections.some((c) => c.style === k)));
     $("#pane-inspect").innerHTML = `
       <header class="insp-head"><span class="kicker">Drawing</span><h2>${esc(graphTitle())}</h2>
-      <p class="small muted">${result.graph.nodes.size} nodes · ${result.graph.rels.size} relationships · ${state.layout.symbols.size} parts drawn · ${[...scene.nets.values()].filter((n) => n.connections.length).length} nets. Select anything on the drawing to inspect it; hover a wire to trace its net.</p></header>
+      <p class="small muted">${result.graph.nodes.size} nodes · ${result.graph.rels.size} relationships · ${state.layout.symbols.size} parts drawn · ${[...scene.nets.values()].filter((n) => n.connections.length).length} nets. Select anything on the drawing to inspect it; hover a wire to trace its net.</p>
+      <p class="small"><a style="color: var(--accent)" href="https://github.com/RCX-Engineering/RCX_RTK_Datalogger" target="_blank" rel="noopener noreferrer">Project and knowledge graph documentation on GitHub</a></p></header>
       ${groups.length ? `<section><h3>Harnesses</h3><ul class="legend">${groups.map((g) => `<li data-group-key="${esc(g.key)}">${[...new Map(g.connections.filter((c) => c.color).map((c) => [c.color.label.toLowerCase(), c])).values()].map(swatch).join("")}<span>${esc(g.name)}</span><span class="count">${g.connections.length}</span></li>`).join("")}</ul></section>` : ""}
       ${styles.length ? `<section><h3>Line styles</h3><ul class="legend styles">${styles.map(([k, name, desc]) => `<li><svg viewBox="0 0 60 16" class="style-sample style-${k}"><line x1="2" y1="8" x2="58" y2="8"/><line class="core" x1="2" y1="8" x2="58" y2="8"/></svg><span>${name}</span><span class="muted small">${desc}</span></li>`).join("")}</ul></section>` : ""}
       <section><h3>Parts</h3><ul class="contacts">${symbolsSorted.map((s) => `<li><button class="link sym-link" data-sym="${esc(s.id)}">${s.ref ? `<span class="refdes small">${esc(s.ref)}</span> ` : ""}${esc(s.name)}</button></li>`).join("")}</ul></section>
@@ -15813,15 +16063,9 @@ module.exports = browser_default;
   }
 
   function renderStats() {
-    const { result, layout, scene } = state;
-    $("#doc-title").textContent = graphTitle();
-    $("#stats").innerHTML = [
-      `${result.graph.nodes.size} nodes`,
-      `${result.graph.rels.size} rels`,
-      `${layout.symbols.size} parts`,
-      `${[...scene.nets.values()].filter((n) => n.connections.length).length} nets`,
-      `rev ${hash(state.source)}`,
-    ].map((s) => `<span class="stat">${esc(s)}</span>`).join("");
+    // The header carries the viewer title only; counts live in the Inspect tab and the revision in the page metadata.
+    const meta = document.querySelector('meta[name="graph-revision"]');
+    if (meta) meta.setAttribute("content", `rev ${hash(state.source)}`);
   }
 
   function renderSymbolsPane() {
@@ -15851,7 +16095,7 @@ module.exports = browser_default;
       set(el, state.options[key]);
       el.addEventListener("change", () => {
         state.options[key] = get(el);
-        store.set("kg-viewer:options", JSON.stringify(state.options));
+        store.set("rcx-hardware-viewer:options", JSON.stringify(state.options));
         run({ relayout });
       });
     };
@@ -15859,7 +16103,6 @@ module.exports = browser_default;
     bind("#opt-unconnected", "showUnconnected", true);
     bind("#opt-netlabels", "netLabels", false);
     bind("#opt-wiretags", "wireTags", false);
-    bind("#opt-colours", "wireColors", false, (el) => (el.checked ? "physical" : "kicad"), (el, v) => { el.checked = v === "physical"; });
 
     const search = $("#search");
     search.addEventListener("input", () => { if (state.mode === "tables") renderTables(); });
@@ -15885,15 +16128,19 @@ module.exports = browser_default;
     if (!host || !state.scene) return;
     const points = state.scene.variationPoints || [];
     host.hidden = !points.length;
-    host.innerHTML = points.map((pt) => `<label class="pick" title="${esc(pt.node.props.notes || "")}"><span>${esc(pt.name)}</span><select data-point="${esc(pt.id)}">${pt.options.map((o) => `<option value="${esc(o.id)}"${o.id === pt.selected ? " selected" : ""}>${esc(o.name)}${o.id === pt.default ? " (default)" : ""}</option>`).join("")}</select></label>`).join("");
+    // A point that does not apply to the current configuration shows N/A and cannot be changed;
+    // its stored choice comes back when it applies again.
+    host.innerHTML = points.map((pt) => `<label class="pick${pt.applicable ? "" : " is-na"}" title="${esc(pt.node.props.notes || "")}"><span>${esc(pt.name)}</span><select data-point="${esc(pt.id)}"${pt.applicable ? "" : " disabled"}>${pt.applicable
+      ? pt.options.map((o) => `<option value="${esc(o.id)}"${o.id === pt.selected ? " selected" : ""}>${esc(o.name)}</option>`).join("")
+      : `<option selected>N/A</option>`}</select></label>`).join("");
   }
 
   function setupVariantPicks() {
     $("#variant-picks").addEventListener("change", (e) => {
       const sel = e.target.closest("select[data-point]");
-      if (!sel) return;
+      if (!sel || sel.disabled) return;
       state.options.variants = { ...(state.options.variants || {}), [sel.dataset.point]: sel.value };
-      store.set("kg-viewer:options", JSON.stringify(state.options));
+      store.set("rcx-hardware-viewer:options", JSON.stringify(state.options));
       run({ relayout: true });
     });
   }
@@ -15933,7 +16180,7 @@ module.exports = browser_default;
       </section>`;
     }).join("");
     const nav = state.tables.map((t) => `<a href="#table-${esc(t.id)}" class="chip-link">${esc(t.title)}</a>`).join("");
-    const shown = (state.scene.variationPoints || []).map((pt) => pt.options.find((o) => o.id === pt.selected)?.name).filter(Boolean);
+    const shown = (state.scene.variationPoints || []).filter((pt) => pt.applicable).map((pt) => pt.options.find((o) => o.id === pt.selected)?.name).filter(Boolean);
     const config = shown.length ? `<p class="small muted table-config">Configuration: ${shown.map(esc).join(" · ")}. Change it with the pickers above.</p>` : "";
     host.innerHTML = `<nav class="table-nav" aria-label="Tables">${nav}</nav>${config}${sections}`;
     host.scrollTop = scrollTop;
