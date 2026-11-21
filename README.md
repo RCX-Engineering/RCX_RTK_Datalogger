@@ -53,7 +53,7 @@ The RCX RTK Datalogger was developed to combine high-rate RTK positioning with v
 |---|---|
 | [`RCX_RTK_Datalogger-schematic_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RCX_RTK_Datalogger-schematic_viewer.html) | Interactive engineering model viewer for the hardware and wiring configuration. Includes the electronics hardware, wiring schematics, and electronics hardware documentation.  |
 | [`RCX_RTK_Datalogger-firmware_architecture_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RCX_RTK_Datalogger-firmware_architecture_viewer.html) | Interactive engineering model viewer for the Datalogger firmware architecture. Contains the systems engineering, software engineering, and semantic models.|
-| [`RCX_RTK_Base-firmware_architecture_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Base/docs/RCX_RTK_Datalogger-firmware_architecture_viewer.html) | Interactive engineering model viewer for the Base firmware architecture.  Contains the systems engineering, software engineering, and semantic models. |
+| [`RCX_RTK_Base-firmware_architecture_viewer.html`](https://rcx-engineering.github.io/RCX_RTK_Datalogger/docs/RCX_RTK_Base-firmware_architecture_viewer.html) | Interactive engineering model viewer for the Base firmware architecture.  Contains the systems engineering, software engineering, and semantic models. |
 
 > Technical note: The authoritative engineering models are embedded as plain text openCypher (.cypher) labeled property graphs within each html viewer along with the associated metadata necessary to interpret the models. This establishes a single authoritative file readable that is readable by both machines and humans. The embedded javascript serves as parsing information.
 ```text
